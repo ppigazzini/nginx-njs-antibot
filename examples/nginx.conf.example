@@ -1,0 +1,89 @@
+# Minimal wiring for nginx-njs-antibot.
+# Replace SERVER_NAME. Secret: openssl rand -hex 32. Validate: nginx -t
+# https://nginx.org/en/docs/njs/
+
+# Debian and Ubuntu load the module from /etc/nginx/modules-enabled; drop
+# this line there.
+load_module modules/ngx_http_js_module.so;
+
+# At least 32 characters.
+env ANTIBOT_SECRET;
+
+# Optional. Each overrides the matching default in the module, so one built
+# antibot.js runs unmodified here. A value outside its range is reported in
+# the error log and the default is used.
+env ANTIBOT_POW_BITS;
+env ANTIBOT_SITE_NAME;
+env ANTIBOT_COOKIE_NAME;
+env ANTIBOT_WINDOW_SIZE;
+env ANTIBOT_COOKIE_TTL;
+env ANTIBOT_RESCREEN_RATE;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    js_path   /etc/nginx/njs/;
+    js_import antibot from antibot.js;
+
+    # njs creates a VM per request, so the counters live here or nowhere.
+    # Without this the gate works and /__antibot_status says the zone is
+    # missing.
+    js_shared_dict_zone zone=antibot:32k type=number;
+
+    upstream backend {
+        server 127.0.0.1:8080;
+    }
+
+    server {
+        listen              443 ssl;
+        server_name         SERVER_NAME;
+        ssl_certificate     /etc/letsencrypt/live/SERVER_NAME/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/SERVER_NAME/privkey.pem;
+
+        # Behind a CDN the module must see the client address, or every
+        # visitor shares one identity.
+        #
+        # set_real_ip_from 10.0.0.0/8;
+        # real_ip_header   X-Forwarded-For;
+
+        location = /__antibot_check {
+            internal;
+            js_content antibot.check;
+        }
+
+        location = /__antibot_challenge {
+            internal;
+            js_content antibot.serve_challenge;
+
+            # The page carries its script and style inline, builds the JS
+            # solver with new Function, compiles the wasm one, and runs both
+            # in a blob worker. A site-wide policy stricter than this stops
+            # every solver and the visitor reads "Verification failed".
+            # add_header Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'unsafe-inline'; worker-src blob:; base-uri 'none'; form-action 'none'" always;
+        }
+
+        # What this worker has done since it started. The numbers say how
+        # much of the traffic is being challenged, so keep the location
+        # restricted.
+        location = /__antibot_status {
+            allow 127.0.0.1;
+            allow ::1;
+            deny  all;
+            js_content antibot.status;
+        }
+
+        # Non-browser routes, and anything that receives a submission, must
+        # precede the catch-all: a request the gate challenges loses its body.
+        location ~ ^/api/ {
+            proxy_pass http://backend;
+        }
+
+        location / {
+            auth_request /__antibot_check;
+            error_page   401 = /__antibot_challenge;
+            proxy_pass   http://backend;
+        }
+    }
+}
