@@ -1,0 +1,139 @@
+name: build
+
+# Compiles the solver, assembles the deployable module, tests it, and runs it
+# under a real nginx. Called by ci.yml on every push and by release.yml before
+# publishing, so both use exactly the same checks.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # Compiles the solver, assembles the deployable module and tests both. No
+  # binary is committed, so this is the only place dist/ comes from.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '25'
+      - name: install clang and lld
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+      - name: toolchain
+        run: |
+          clang --version | head -1
+          wasm-ld --version || true
+          node --version
+          clang --print-targets | grep -i wasm || true
+      # Split so the job metadata names the stage that failed, without
+      # needing the log.
+      - name: compile and assemble
+        run: ./build.sh --no-test
+      - name: no compiler warnings
+        run: ./build.sh --strict --no-test
+      - name: the documents name a way to get the module that exists
+        run: |
+          # dist/ is not committed, so the instruction a reader follows first
+          # has to be the build. A release is where a build is published, and
+          # pointing at one as the way to obtain the file is only correct
+          # while releases exist.
+          for f in README.md docs/installation.md; do
+            grep -q './build.sh' "$f" || { echo "$f does not name ./build.sh"; exit 1; }
+            if grep -qi 'download it from a release' "$f"; then
+              echo "$f tells the reader to download a release:"
+              grep -ni 'download it from a release' "$f"; exit 1
+            fi
+          done
+          count=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq 'length')
+          echo "ok: build instruction present in both, $count release(s) published"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: solver suite
+        run: node test/solver.test.mjs
+      - name: module suite
+        run: node test/module.test.mjs
+      - name: module input fuzzing
+        run: node test/module-fuzz.mjs dist/antibot.js 100000 $RANDOM
+      - name: release guards
+        # They run once per release, so they are checked on every push.
+        run: ./test/release/check.sh
+      - name: npm test
+        # docs/development.md gives this as the way to run the suites, so a run
+        # exercises it rather than only the steps above.
+        run: npm test
+      - name: record what was built
+        run: sha256sum dist/pow_solver.wasm dist/antibot.js
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: antibot
+          path: |
+            dist/antibot.js
+            dist/pow_solver.wasm
+          if-no-files-found: error
+
+  # Loads the built module in njs under a real nginx. This is the only lane
+  # where the module runs in njs rather than node, so it is what catches a
+  # construct njs does not support.
+  mutants:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '25'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: antibot
+          path: dist
+      # Grades the suites rather than the module: each defect names the suite
+      # that has to notice it. Its own job because it runs a suite per
+      # mutation and takes minutes.
+      - name: mutation list
+        run: node test/mutants.mjs
+
+  example:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '25'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: antibot
+          path: dist
+      - name: install nginx and the njs module
+        run: sudo apt-get update && sudo apt-get install -y nginx libnginx-mod-http-js
+      - name: shellcheck
+        run: shellcheck test/nginx/check.sh test/native/check.sh test/release/check.sh test/release/guards.sh build.sh
+      # The whole lane is a script, so it runs on a developer's machine the
+      # way test/native/check.sh does. It writes its config, certificate and
+      # module under a temporary prefix and needs no privilege.
+      - name: run the module under nginx
+        run: ./test/nginx/check.sh dist/antibot.js 8443
+
+  # Compiles the solver natively through a shim for the wasm SIMD header and
+  # checks every answer against OpenSSL's SHA-256, under AddressSanitizer,
+  # UndefinedBehaviorSanitizer, libFuzzer and valgrind.
+  sanitize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: install clang, libssl-dev and valgrind
+        run: sudo apt-get update && sudo apt-get install -y clang libssl-dev valgrind
+      # Coverage accumulates only if the corpus outlives the run.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: test/native/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: sanitizers, libFuzzer and valgrind
+        run: ./test/native/check.sh 120 test/native/corpus

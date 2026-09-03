@@ -1,0 +1,6 @@
+node_modules/
+dist/
+__DEV/
+# A fuzzing corpus, cached by CI between runs. Not a fixture.
+test/native/corpus/
+*.tmp
