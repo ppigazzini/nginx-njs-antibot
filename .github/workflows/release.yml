@@ -1,0 +1,71 @@
+name: release
+
+# Manual release. Builds, tests and runs the module under nginx, then attaches
+# antibot.js, which is the only file a server needs.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example v0.1.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ./.github/workflows/build.yml
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: antibot
+          path: dist
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Passed through the environment, never interpolated into the
+          # script, so a crafted input cannot become shell.
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          . ./test/release/guards.sh
+          release_check_tag_shape "$INPUT_TAG"
+
+          # gh api writes its error body to stdout, so a tag that does not
+          # exist yields text rather than nothing. Existence is the exit
+          # status of the refs endpoint; the commit is resolved only after.
+          existing=""
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$INPUT_TAG" \
+               >/dev/null 2>&1; then
+            existing=$(gh api "repos/$GITHUB_REPOSITORY/commits/$INPUT_TAG" --jq .sha)
+          fi
+          release_check_tag_target "$INPUT_TAG" "$existing" "$GITHUB_SHA"
+
+          built=$(sed -n 's/^const ANTIBOT_VERSION = "\(.*\)";$/\1/p' dist/antibot.js)
+          release_check_version "$INPUT_TAG" "$built"
+
+          sum=$(sha256sum dist/antibot.js | cut -d' ' -f1)
+
+          # The tag is pushed before the release is made, from the commit this
+          # run tested. Creating the release with --target instead names a
+          # commit by hash, and a push that lands while the run is in flight
+          # can leave that commit on no branch, which GitHub refuses with 403.
+          # A pushed tag is a ref, so the commit stays reachable and the
+          # release is made against something that exists.
+          if [ -z "$existing" ]; then
+            git tag "$INPUT_TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$INPUT_TAG"
+          fi
+
+          gh release create "$INPUT_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$INPUT_TAG" \
+            --notes "sha256  $sum" \
+            dist/antibot.js
