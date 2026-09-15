@@ -53,6 +53,7 @@ cookie is valid for its own slot and the one after it, so it lasts between
 | `COOKIE_NAME` | `ANTIBOT_COOKIE_NAME` | `__Host-antibot-ac` | cookie name |
 | `SITE_NAME` | `ANTIBOT_SITE_NAME` | `""` | heading on the challenge page; empty means none |
 | `RESCREEN_RATE` | `ANTIBOT_RESCREEN_RATE` | 0.02 | fraction of document requests re-challenged; below 1 |
+| `CHALLENGE_LOG_LEVEL` | `ANTIBOT_CHALLENGE_LOG_LEVEL` | `info` | level the challenge line is written at: `off`, `info`, `warn` or `error` |
 | `POW_BITS_MAX` | source only | 32 | ceiling; `POW_BITS` is clamped to it |
 | `POW_EFFORT_FACTOR` | source only | 64 | work cap before a client gives up |
 | `IDENTITY_FIELD_MAX` | source only | 256 | characters of each identity component compared |
@@ -61,9 +62,10 @@ cookie is valid for its own slot and the one after it, so it lasts between
 Changing `COOKIE_NAME` invalidates existing cookies and challenges every
 visitor once. `SITE_NAME` is HTML-escaped before insertion.
 
-`POW_BITS`, `WINDOW_SIZE`, `COOKIE_TTL`, `RESCREEN_RATE` and `COOKIE_NAME`
-are checked when the module loads, whether they came from the environment or
-from the source. A value outside its range is replaced by the default and
+`POW_BITS`, `WINDOW_SIZE`, `COOKIE_TTL`, `RESCREEN_RATE`, `COOKIE_NAME` and
+`CHALLENGE_LOG_LEVEL` are checked when the module loads, whether they came
+from the environment or from the source. A value outside its range is replaced
+by the default and
 reported in the error log once, or on every request where no shared zone is
 configured to record that it was reported. A cookie name without the
 `__Host-` prefix is kept and reported, because it gives up the guarantee that
@@ -150,11 +152,16 @@ says how much of the traffic is being challenged.
 
 ## Logging
 
-The module writes one
-[`info`](https://nginx.org/en/docs/ngx_core_module.html#error_log) line per
-challenge served, carrying the client address and the request URI. Set
-`error_log` to `info` to keep them; nginx drops them at its default level, and
-one challenge is served for every request that arrives without a cookie.
+The module writes one line per challenge served, carrying the client address
+and the request URI, at the level `CHALLENGE_LOG_LEVEL` names. One challenge is
+served for every request that arrives without a cookie.
+
+[`error_log`](https://nginx.org/en/docs/ngx_core_module.html#error_log) writes
+a line only at or above the level it is set to, and defaults to `error`. At the
+default `CHALLENGE_LOG_LEVEL` of `info`, keeping the line means setting
+`error_log` to `info`, which also keeps every `info` line nginx writes itself.
+Raising `CHALLENGE_LOG_LEVEL` to `warn` or `error` keeps the line at an
+`error_log` level that admits less. `off` writes nothing.
 
 A misconfigured secret is written at `error` under the same rule.
 

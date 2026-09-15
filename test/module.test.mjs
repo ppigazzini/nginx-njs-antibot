@@ -83,11 +83,12 @@ mod.serve_challenge(r0);
 check(r0.code === 200, "serve_challenge did not return 200");
 const page = r0.body;
 
-/* Everything below reads the page the module just built. A pattern that stops
+/* Reads one value out of a challenge page: the one built at load through
+   fromPage, or one a variant served, through fromBody. A pattern that stops
    matching means the page changed shape, and saying so beats a TypeError from
    indexing null, which is what the rest of the run would otherwise report. */
-const fromPage = (what, re) => {
-    const m = re.exec(page);
+const fromBody = (body, what, re) => {
+    const m = re.exec(body);
     if (m === null) {
         throw new Error('the challenge page no longer carries ' + what +
                         ' where this suite reads it (' + re + '), so every ' +
@@ -95,6 +96,7 @@ const fromPage = (what, re) => {
     }
     return m[1];
 };
+const fromPage = (what, re) => fromBody(page, what, re);
 const challenge = fromPage('the challenge', /var challenge="([0-9a-f]+)"/);
 const bits      = Number(fromPage('the difficulty', /,bits=(\d+);/));
 const slot      = fromPage('the slot', /var slot="(\d+)"/);
@@ -369,6 +371,73 @@ await section("no configuration skips verification", async () => {
         console.log('  replay at 20 bits: own ' + mine.code + ', other ' + theirs.code);
 });
 
+/* The difficulty the page ships is advisory: check() verifies with
+   POW_BITS_EFFECTIVE, and a cookie carries a slot and a nonce with no field
+   for a difficulty, so a tampered page, a patched worker or a hand-written
+   client cannot choose the bar it is judged against. Solving below the
+   server's difficulty is refused. Solving above it is accepted, because a
+   digest with more leading zero bits has the ones asked for. */
+await section("the difficulty the page ships does not decide acceptance", async () => {
+    const SERVER_BITS = 16;
+    /* variantFor rewrites the constant, which env_number overrides. Without
+       this, running the suite with ANTIBOT_POW_BITS set fails the check below
+       rather than grading the difficulty. */
+    const savedBits = process.env.ANTIBOT_POW_BITS;
+    delete process.env.ANTIBOT_POW_BITS;
+    const server = await variantFor(SERVER_BITS);
+    if (savedBits === undefined) delete process.env.ANTIBOT_POW_BITS;
+    else process.env.ANTIBOT_POW_BITS = savedBits;
+
+    const issued = makeR(null);
+    server.serve_challenge(issued);
+    const target = fromBody(issued.body, 'the challenge', /var challenge="([0-9a-f]+)"/);
+    const issuedSlot = fromBody(issued.body, 'the slot', /var slot="(\d+)"/);
+    const shipped = Number(fromBody(issued.body, 'the difficulty', /,bits=(\d+);/));
+    check(shipped === SERVER_BITS,
+          'the variant ships ' + shipped + ' bits, not ' + SERVER_BITS);
+
+    const meets = (nonce, want) => {
+        const d = crypto.createHash('sha256').update(target + ':' + nonce).digest();
+        return (d.readUInt32BE(0) >>> (32 - want)) === 0;
+    };
+    /* `refuse` is what makes the cases below SERVER_BITS test what they claim.
+       The first nonce meeting `want` also meets SERVER_BITS once in
+       2^(SERVER_BITS - want) challenges, and that nonce would be accepted for
+       the right reason, reporting a pass that proves nothing. */
+    const solve = (want, refuse) => {
+        for (let n = 0; n < 5e7; n++) {
+            if (meets(n, want) && !(refuse && meets(n, SERVER_BITS))) return n;
+        }
+        return -1;
+    };
+
+    /* The cases above SERVER_BITS stop at SERVER_BITS + 2. The variant's
+       POW_MAX_ITERATIONS is 64 times its own expected work, so a solve at
+       SERVER_BITS + 2 runs past it with probability e^-16; further up, the cap
+       and not the difficulty would be what refused the cookie. */
+    const CASES = [10, 12, 14, SERVER_BITS, SERVER_BITS + 1, SERVER_BITS + 2];
+    let ran = 0;
+    for (const want of CASES) {
+        const below = want < SERVER_BITS;
+        const nonce = solve(want, below);
+        if (!check(nonce >= 0, 'no nonce found at ' + want + ' bits')) { continue; }
+        const r = makeR(COOKIE_NAME + '=' + issuedSlot + '.' + nonce,
+                        '203.0.113.7', 'empty');
+        server.check(r);
+        const wanted = below ? 401 : 204;
+        check(r.code === wanted,
+              'client at ' + want + ' bits, server at ' + SERVER_BITS + ' bits: ' +
+              r.code + ', expected ' + wanted);
+        ran++;
+        console.log('  client ' + String(want).padStart(2) + ' bits, server ' +
+                    SERVER_BITS + ' bits -> ' + r.code +
+                    (below ? '  refused' : '  accepted'));
+    }
+    /* A run that solved nothing would report six passes and no coverage. */
+    check(ran === CASES.length,
+          'only ' + ran + ' of ' + CASES.length + ' difficulty cases ran');
+});
+
 /* Run the page the way a browser does. Parsing the inline script proves only
    that it is syntactically valid; this executes it against stubs for document,
    navigator, Worker, Blob and URL, so the cookie write, the worker pool and
@@ -527,6 +596,62 @@ await section("settings are read from the environment", async () => {
               'a valid name without the __Host- prefix was replaced');
         check(loose.logged.indexOf('__Host-') !== -1,
               'no error-log line for a name without the __Host- prefix');
+});
+
+/* One line is written per challenge, so which level it lands at decides
+   whether a deployment can read it at all: nginx writes a line only at or
+   above the level error_log is set to, and that defaults to error. Without
+   this setting the level is reachable only by editing the built module. */
+await section("the challenge log line is written at the configured level", async () => {
+    const at = async (value) => {
+        const saved = process.env.ANTIBOT_CHALLENGE_LOG_LEVEL;
+        if (value === null) delete process.env.ANTIBOT_CHALLENGE_LOG_LEVEL;
+        else process.env.ANTIBOT_CHALLENGE_LOG_LEVEL = value;
+        try {
+            const m = await variantWith([]);
+            const seen = { log: [], warn: [], error: [] };
+            const r = makeR(null, '203.0.113.6');
+            r.log = (s) => seen.log.push(s);
+            r.warn = (s) => seen.warn.push(s);
+            r.error = (s) => seen.error.push(s);
+            m.serve_challenge(r);
+            check(r.code === 200, 'level ' + JSON.stringify(value) +
+                  ' served ' + r.code + ', so the line was not the only thing that moved');
+            return seen;
+        } finally {
+            if (saved === undefined) delete process.env.ANTIBOT_CHALLENGE_LOG_LEVEL;
+            else process.env.ANTIBOT_CHALLENGE_LOG_LEVEL = saved;
+        }
+    };
+    const lines = (seen, k) =>
+        seen[k].filter((line) => line.indexOf('challenge served to') !== -1).length;
+
+    let ran = 0;
+    for (const [value, where] of [[null, 'log'], ['info', 'log'], ['warn', 'warn'],
+                                  ['error', 'error'], ['off', null]]) {
+        const seen = await at(value);
+        for (const k of ['log', 'warn', 'error']) {
+            const want = k === where ? 1 : 0;
+            check(lines(seen, k) === want, 'level ' + JSON.stringify(value) + ': r.' +
+                  k + ' carried ' + lines(seen, k) + ' challenge lines, expected ' + want);
+        }
+        ran++;
+        console.log('  ANTIBOT_CHALLENGE_LOG_LEVEL=' + String(value).padEnd(5) +
+                    ' -> ' + (where === null ? 'nothing written' : 'r.' + where));
+    }
+
+    /* An unknown level falls back to the constant and says so, the way every
+       other setting outside its range does. */
+    const bad = await at('verbose');
+    check(lines(bad, 'log') === 1, 'an unknown level did not fall back to info');
+    check(bad.error.some((line) => line.indexOf('CHALLENGE_LOG_LEVEL=verbose') !== -1),
+          'no error-log line for an unknown level; wrote: ' + bad.error.join(' | '));
+    ran++;
+    console.log('  ANTIBOT_CHALLENGE_LOG_LEVEL=verbose -> r.log, and reported');
+
+    /* A run where serve_challenge stopped writing the line would otherwise
+       report every "expected 0" as a pass. */
+    check(ran === 6, 'only ' + ran + ' of 6 level cases ran');
 });
 
 /* RESCREEN_RATE and COOKIE_TTL are checked at load the way POW_BITS is. Both

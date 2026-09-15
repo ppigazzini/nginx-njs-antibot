@@ -165,6 +165,15 @@ const POW_EFFORT_FACTOR = 64;
 // Applies to top-level navigations only.
 const RESCREEN_RATE = 0.02;
 
+// Level the per-challenge log line is written at: "info", "warn", "error" or
+// "off". A challenge is the module's ordinary answer, so it is written at
+// info, which nginx keeps out of an error log below that level. A deployment
+// that wants the line without turning the whole error log up to info raises
+// this; "off" writes nothing.
+const CHALLENGE_LOG_LEVEL = "info";
+
+const CHALLENGE_LOG_LEVELS = ["off", "info", "warn", "error"];
+
 // How many cookies sent under COOKIE_NAME are verified. A browser sends one:
 // the __Host- prefix forces Path=/, so a host cannot hold two. Trying every
 // one would let a request choose how many hashes the server performs.
@@ -237,6 +246,17 @@ const COOKIE_TTL_EFFECTIVE = (function () {
         fail_config("COOKIE_TTL=" + v + " is below twice WINDOW_SIZE=" + floor +
                     ", using " + floor);
         v = floor;
+    }
+    return v;
+})();
+
+const CHALLENGE_LOG_LEVEL_EFFECTIVE = (function () {
+    const v = env_string("CHALLENGE_LOG_LEVEL", CHALLENGE_LOG_LEVEL);
+    if (CHALLENGE_LOG_LEVELS.indexOf(v) === -1) {
+        fail_config("CHALLENGE_LOG_LEVEL=" + v + " is not one of " +
+                    CHALLENGE_LOG_LEVELS.join(", ") + ", using " +
+                    CHALLENGE_LOG_LEVEL);
+        return CHALLENGE_LOG_LEVEL;
     }
     return v;
 })();
@@ -371,6 +391,22 @@ function clip(text) {
     return text.length > IDENTITY_FIELD_MAX
         ? text.substring(0, IDENTITY_FIELD_MAX)
         : text;
+}
+
+// The challenge line goes to the level CHALLENGE_LOG_LEVEL_EFFECTIVE names.
+// njs maps r.log to info, r.warn to warn and r.error to error, and nginx
+// writes a line only at or above the level error_log is set to.
+function log_challenge(r, message) {
+    if (CHALLENGE_LOG_LEVEL_EFFECTIVE === "off") {
+        return;
+    }
+    if (CHALLENGE_LOG_LEVEL_EFFECTIVE === "warn") {
+        r.warn(message);
+    } else if (CHALLENGE_LOG_LEVEL_EFFECTIVE === "error") {
+        r.error(message);
+    } else {
+        r.log(message);
+    }
 }
 
 // A URI and an address reach the log as the client sent them, and nginx writes
@@ -694,10 +730,11 @@ function serve_challenge(r) {
     const slot = current_slot();
     const html = build_challenge(r, slot);
 
-    // info, not warning: a challenge is the module's ordinary answer, and one
-    // arrives for every request that has no cookie yet.
-    r.log("antibot: challenge served to " + log_field(r.remoteAddress) +
-          " uri=" + log_field(r.uri));
+    // One line arrives for every request that has no cookie yet, so the level
+    // is a setting: info by default, raised where the line has to show in an
+    // error log that is not turned up to info.
+    log_challenge(r, "antibot: challenge served to " + log_field(r.remoteAddress) +
+                  " uri=" + log_field(r.uri));
 
     r.headersOut["Content-Type"] = "text/html; charset=utf-8";
     r.headersOut["Cache-Control"] = "no-store, no-cache, must-revalidate";

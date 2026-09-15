@@ -41,6 +41,19 @@ so a shared cache entry would hand one identity's challenge to another.
 
 ## The gate
 
+**The difficulty in the page is advisory, and the server verifies with its
+own.** `pow_valid` reads `POW_BITS_EFFECTIVE`, and a cookie carries a slot and
+a nonce and no field for a difficulty, so nothing a request sends selects the
+bar it is judged against. A client that solves at fewer bits than the server
+enforces produces a nonce the server refuses. One that solves at more produces
+a nonce the server accepts, for more work than it needs.
+
+The page ships the value because `solve(start, count, bits)` has no other
+stopping condition, and `cap` and `expected` state the same number again.
+Withholding it buys nothing: the [security model](security.md) rests on the
+HMAC key being the only secret, and the page ships the algorithm, the
+challenge and the solver in any case.
+
 **A challenged request answers 200, not 401.** `error_page 401 = /...` takes
 the status from the location it forwards to. A browser renders the page either
 way; the cost is that a health check reading the status line cannot tell a

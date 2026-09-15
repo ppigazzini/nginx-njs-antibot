@@ -1,6 +1,6 @@
 {
   "name": "nginx-njs-antibot",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Proof-of-work bot gate for nginx, implemented as an njs module with a SIMD WebAssembly solver",
   "license": "BlueOak-1.0.0 OR Apache-2.0",
   "type": "module",

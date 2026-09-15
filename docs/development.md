@@ -70,8 +70,10 @@ that ships.
 paths and feeds each cookie back to `check()`. It also covers the rejection
 cases, the slot boundary from both sides, settings read from the environment,
 the constants that are validated at load, the identity invariant in both
-directions, the cookie-candidate bound, the escaping of `SITE_NAME`, the page
-template's tokens, and the cost of the inputs a request controls.
+directions, the cookie-candidate bound, the difficulty the page ships against
+the one the server enforces, the level the challenge line is written at, the
+escaping of `SITE_NAME`, the page template's tokens, and the cost of the
+inputs a request controls.
 
 `test/mutants.mjs` grades the suites rather than the module. It holds a fixed
 list of defects, each naming the suite that must notice it, writes each into
