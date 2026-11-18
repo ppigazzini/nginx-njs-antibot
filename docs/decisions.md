@@ -101,7 +101,7 @@ nginx's default level. The zone records that they were written.
 **No binary is committed.** `dist/` is a build product. A committed wasm could
 not be checked against the source that claims to produce it, and a reader
 would have to trust it. The release attaches the artifact CI built, with its
-SHA-256 in the notes.
+SHA-256 in the notes and a signed build provenance attestation.
 
 **The page, the worker and the JS solver are files, not string literals.**
 `node --check` validates a file and cannot validate a string inside one, so a
@@ -129,6 +129,30 @@ reachable, so the release is made against a ref rather than a hash.
 version stamped into the artifact must already agree. Publishing onto a tag
 that names another commit would attach this build to that one, because
 `gh release create --target` applies only when the tag is new.
+
+**Provenance is signed in the `publish` job, not in `build`.** `build` runs
+for every push and pull request. Signing there needs `ci.yml` to grant
+`id-token: write` to every run, and signs builds that are never released. The
+`publish` job signs the one file it attaches, after the guards pass.
+
+## Workflows
+
+**A `uses:` line names an exact tag, and `actions.lock` holds the commit.** A
+commit SHA in a `uses:` line fixes that action and not the actions it calls.
+The lockfile records both, and the runner executes the recorded commit after
+a tag moves. The tag is exact, `v7.0.1` and not `v7`, because
+`gh actions-lock` does not detect a lockfile change that moves a floating ref
+back to an older commit in its history.
+
+**A newer `gh actions-lock` release warns and does not fail.** Dependabot has
+no ecosystem for a gh extension, and the extension ships no action a `uses:`
+line could name. A failure would stop every push and pull request for a
+release none of them made.
+
+**zizmor fails the job and uploads nothing to code scanning.** Every other
+check in CI is a job that fails. In code scanning mode zizmor-action does not
+fail on a finding, and the upload needs `security-events: write` from both
+callers of `build.yml`.
 
 ## Tests
 

@@ -146,7 +146,7 @@ boundaries where the block is rebuilt.
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `build.yml` | `workflow_call` | four jobs: `build`, `mutants`, `example`, `sanitize` |
+| `build.yml` | `workflow_call` | five jobs: `build`, `mutants`, `example`, `sanitize`, `workflows` |
 | `ci.yml` | push, pull request | calls `build.yml` |
 | `release.yml` | manual, tag required | calls `build.yml`, then publishes |
 
@@ -176,9 +176,24 @@ The `build` job compiles the solver, assembles the module, repeats the build
 with warnings as errors, runs the three suites and `npm test`, and uploads the
 artifact the other jobs take. The `sanitize` job runs `test/native/check.sh`.
 
-Actions are pinned to a commit SHA with the release in a trailing comment: a
-tag can be moved to point at different code after review, and a bare SHA says
-nothing about age.
+The `workflows` job runs [zizmor](https://docs.zizmor.sh/audits/) over the
+workflows and `.github/dependabot.yml` and fails on any finding. It then runs
+`gh actions-lock --verify`, which fails when `.github/workflows/actions.lock`
+disagrees with a `uses:` line or a locked commit no longer verifies upstream.
+
+A `uses:` line names an exact tag, such as `actions/checkout@v7.0.1`.
+[`actions.lock`](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles)
+records the commit each tag resolved to, and the commits of the actions those
+call, and the runner executes the recorded commit even after the tag moves.
+After changing a `uses:` line, run
+[`gh actions-lock`](https://github.com/github/gh-actions-lock) and commit the
+lockfile with it. Dependabot proposes an action release once it is 7 days old
+and regenerates the lockfile entry in the same pull request.
+
+`ACTIONS_LOCK_VERSION` in `build.yml` is the version of `gh actions-lock` the
+job installs, and Dependabot does not update it. The job writes a warning when
+a newer release has been out for the cooldown `dependabot.yml` sets; raise the
+version by hand and rerun `gh actions-lock`.
 
 The wasm is not byte-reproducible across clang versions, so CI records the
 compiler version and the SHA-256 of what it built alongside the artifact.
@@ -194,3 +209,14 @@ Run the `release` workflow from the Actions tab with the tag, such as
 for it does.
 It builds, tests and runs the module under nginx, then attaches `antibot.js`
 and nothing else: the solver is embedded in it. The SHA-256 is in the notes.
+
+Before it publishes, the `publish` job signs a
+[SLSA build provenance](https://slsa.dev/spec/v1.0/provenance) attestation for
+`antibot.js` with
+[`actions/attest`](https://github.com/actions/attest). The signing certificate
+is a short-lived one that [Sigstore](https://www.sigstore.dev/) issues to the
+workflow run. The job then runs the provenance check that
+[installation](installation.md#the-module) gives, and publishes only if it
+passes. After publishing it runs the release check from the same page, which
+fails unless the repository has immutable releases enabled. Releases run one
+at a time, and a started one is never cancelled.

@@ -10,6 +10,6 @@
     "test": "node test/solver.test.mjs && node test/module.test.mjs && node test/module-fuzz.mjs"
   },
   "engines": {
-    "node": ">=25"
+    "node": ">=26"
   }
 }

@@ -1,8 +1,8 @@
 name: build
 
-# Compiles the solver, assembles the deployable module, tests it, and runs it
-# under a real nginx. Called by ci.yml on every push and by release.yml before
-# publishing, so both use exactly the same checks.
+# Compiles the solver, assembles the deployable module, tests it, runs it
+# under a real nginx, and audits the workflows. Called by ci.yml on every push
+# and by release.yml before publishing, so both use exactly the same checks.
 on:
   workflow_call:
 
@@ -16,10 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
-          node-version: '25'
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26'
       - name: install clang and lld
         run: sudo apt-get update && sudo apt-get install -y clang lld
       - name: toolchain
@@ -72,7 +74,7 @@ jobs:
         run: npm test
       - name: record what was built
         run: sha256sum dist/pow_solver.wasm dist/antibot.js
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: antibot
           path: |
@@ -80,19 +82,18 @@ jobs:
             dist/pow_solver.wasm
           if-no-files-found: error
 
-  # Loads the built module in njs under a real nginx. This is the only lane
-  # where the module runs in njs rather than node, so it is what catches a
-  # construct njs does not support.
   mutants:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
-          node-version: '25'
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26'
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: antibot
           path: dist
@@ -102,16 +103,21 @@ jobs:
       - name: mutation list
         run: node test/mutants.mjs
 
+  # Loads the built module in njs under a real nginx. This is the only lane
+  # where the module runs in njs rather than node, so it is what catches a
+  # construct njs does not support.
   example:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
-          node-version: '25'
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26'
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: antibot
           path: dist
@@ -132,14 +138,69 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - name: install clang, libssl-dev and valgrind
         run: sudo apt-get update && sudo apt-get install -y clang libssl-dev valgrind
       # Coverage accumulates only if the corpus outlives the run.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@v6.1.0
         with:
           path: test/native/corpus
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
       - name: sanitizers, libFuzzer and valgrind
         run: ./test/native/check.sh 120 test/native/corpus
+
+  # Audits the workflows and the Dependabot config, and checks that
+  # .github/workflows/actions.lock records the commit of every action they
+  # use, including the actions those call.
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTIONS_LOCK_VERSION: v0.4.1
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      # Fails on any finding and prints the findings to the log.
+      - uses: zizmorcore/zizmor-action@v0.8.1
+        with:
+          advanced-security: false
+      # The extension is a binary from an immutable release. verify-asset
+      # checks it against the attestation GitHub signed for that release.
+      - name: install gh-actions-lock
+        run: |
+          gh extension install github/gh-actions-lock --pin "$ACTIONS_LOCK_VERSION"
+          gh release verify-asset "$ACTIONS_LOCK_VERSION" \
+            "${XDG_DATA_HOME:-$HOME/.local/share}/gh/extensions/gh-actions-lock/gh-actions-lock" \
+            --repo github/gh-actions-lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # Fails when the lockfile disagrees with a uses: line or a locked commit
+      # no longer verifies upstream.
+      - name: the lockfile matches the workflows
+        run: gh actions-lock --verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # Dependabot does not update a gh extension. This step warns when a
+      # release newer than ACTIONS_LOCK_VERSION has passed the cooldown
+      # dependabot.yml sets for the actions.
+      - name: gh-actions-lock is current
+        run: |
+          days=$(sed -n 's/^ *default-days: *\([0-9][0-9]*\)$/\1/p' .github/dependabot.yml)
+          [ -n "$days" ] || { echo "no default-days in .github/dependabot.yml"; exit 1; }
+          eligible=$(gh release list --repo github/gh-actions-lock \
+                       --exclude-drafts --exclude-pre-releases --limit 50 \
+                       --json tagName,publishedAt \
+                       --jq "[.[] | select(now - (.publishedAt | fromdateiso8601) >= $days * 86400)][0].tagName // empty")
+          [ -n "$eligible" ] || { echo "no gh-actions-lock release is $days days old"; exit 1; }
+          newest=$(printf '%s\n' "$ACTIONS_LOCK_VERSION" "$eligible" | sort -V | tail -1)
+          if [ "$newest" != "$ACTIONS_LOCK_VERSION" ]; then
+            echo "::warning::gh-actions-lock $eligible is out at least $days days; build.yml pins $ACTIONS_LOCK_VERSION"
+          else
+            echo "ok: pinned $ACTIONS_LOCK_VERSION, newest release out at least $days days is $eligible"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

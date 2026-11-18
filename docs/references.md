@@ -50,6 +50,19 @@ runtime.
 - [`env`](https://nginx.org/en/docs/ngx_core_module.html#env): how every
   setting reaches the module.
 
+## Supply chain
+
+- [Workflow dependency lockfiles](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles):
+  what `.github/workflows/actions.lock` records and what the runner enforces.
+- [zizmor audits](https://docs.zizmor.sh/audits/): the checks the `workflows`
+  job runs.
+- [Artifact attestations](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds):
+  how a release signs provenance for `antibot.js`.
+- [SLSA build provenance v1.0](https://slsa.dev/spec/v1.0/provenance): the
+  predicate the attestation carries.
+- [Sigstore](https://www.sigstore.dev/): the short-lived certificate the
+  attestation is signed with.
+
 ## The browser side
 
 - [Cookie prefixes, RFC 6265bis](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis#name-cookie-name-prefixes):

@@ -14,4 +14,4 @@ permissions:
 
 jobs:
   verify:
-    uses: ./.github/workflows/build.yml
+    uses: $/.github/workflows/build.yml

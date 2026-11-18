@@ -4,6 +4,10 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    # A release is proposed once it is 7 days old, so one that is pulled or
+    # retagged in its first week is never picked up.
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns:

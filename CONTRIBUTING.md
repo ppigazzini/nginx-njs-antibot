@@ -9,7 +9,9 @@ and the test suites. `./build.sh --strict` is what CI runs.
 
 CI must pass. It builds the wasm, runs the solver and module suites, fuzzes
 the module's input parsing, checks the solver under ASan, UBSan and valgrind
-against an OpenSSL oracle, and loads the module into nginx.
+against an OpenSSL oracle, loads the module into nginx, audits the workflows
+with zizmor and checks `.github/workflows/actions.lock` against them. A change
+to a `uses:` line carries the lockfile `gh actions-lock` writes for it.
 
 A change to the solver or the verifier carries a test that fails without it.
 A change to a measured number in the docs carries the measurement.

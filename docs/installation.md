@@ -46,6 +46,27 @@ Run `./build.sh`, which writes it to `dist/antibot.js`. Published builds
 appear under
 [releases](https://github.com/ppigazzini/nginx-njs-antibot/releases).
 
+A release after v0.0.2 is
+[immutable](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases):
+once published, its tag and `antibot.js` cannot be changed or deleted. It
+carries two signed attestations, and the
+[GitHub CLI](https://cli.github.com/manual/gh_attestation_verify) verifies a
+downloaded copy against each. The release attestation binds the file to the
+release:
+
+```sh
+gh release verify-asset v0.1.0 antibot.js --repo ppigazzini/nginx-njs-antibot
+```
+
+The build provenance attestation binds the file's SHA-256 to the commit and
+the workflow run that built it:
+
+```sh
+gh attestation verify antibot.js \
+  --repo ppigazzini/nginx-njs-antibot \
+  --signer-workflow ppigazzini/nginx-njs-antibot/.github/workflows/release.yml
+```
+
 ## Wiring
 
 The module must be reachable through `js_path` and imported with `js_import`.
