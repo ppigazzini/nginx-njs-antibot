@@ -2,7 +2,7 @@
 
 - [Installation](installation.md): requirements, the module, wiring
 - [Configuration](configuration.md): the contract, constants, difficulty,
-  re-screening
+  the solve report, counters, logging
 - [Design](design.md): the algorithm, both solvers, the worker pool, the cost
   model
 - [Security model](security.md): what is secret, identity, what the gate does

@@ -7,8 +7,7 @@
  * threads, and the resulting cookie is fed back to check(). Both solver paths
  * are exercised: the SIMD wasm module, and the embedded pure-JS solver that
  * takes over when no module is supplied, which is what happens on an engine
- * that cannot compile the SIMD build. Re-screening is checked to reach
- * navigations only.
+ * that cannot compile the SIMD build.
  *
  * For the solvers themselves see test/solver.test.mjs.
  * Exit status is non-zero if any check fails.
@@ -68,10 +67,10 @@ new Function("self", workerData.src)(self_);
 parentPort.on('message', (d) => { if (self_.onmessage) self_.onmessage({ data: d }); });
 `;
 
-const makeR = (cookie, ip = "203.0.113.7", dest = null) => ({
-    remoteAddress: ip, uri: "/tests",
+const makeR = (cookie, ip = "203.0.113.7") => ({
+    remoteAddress: ip, uri: "/__antibot_challenge",
+    variables: { request_uri: "/tests" }, args: {},
     headersIn: { "User-Agent": "Mozilla/5.0", "Accept-Language": "en-US",
-                 ...(dest ? { "Sec-Fetch-Dest": dest } : {}),
                  ...(cookie ? { Cookie: cookie } : {}) },
     headersOut: {}, error() {}, warn() {},
     logged: [], log(msg) { this.logged.push(msg); },
@@ -161,12 +160,7 @@ await section("both solver paths reach the same nonce", async () => {
             const secs = (Date.now() - t) / 1000;
             check(digestOk(nonce), label + " lanes=" + lanes + ": digest does not meet " + bits + " bits");
 
-            /* Sec-Fetch-Dest: empty makes this a subresource request, which is
-               never re-screened. A navigation would be re-screened at
-               RESCREEN_RATE and return 401 for a perfectly valid cookie, so
-               asserting 204 on one would be flaky, not strict. Re-screening has
-               its own test below. */
-            const rc = makeR(COOKIE_NAME + "=" + slot + "." + nonce, "203.0.113.7", "empty");
+            const rc = makeR(COOKIE_NAME + "=" + slot + "." + nonce, "203.0.113.7");
             mod.check(rc);
             check(rc.code === 204, label + " lanes=" + lanes + ": solved cookie rejected (" + rc.code + ")");
             console.log("  " + label + " lanes=" + lanes + ": " + secs.toFixed(2) + "s nonce=" +
@@ -184,7 +178,7 @@ const cases = [
     ["stale slot",     makeR(COOKIE_NAME + "=" + (Number(slot) - 2) + "." + good)],
     ["malformed",      makeR(COOKIE_NAME + "=notaslot.notanonce")],
 ];
-await section("difficulty is clamped to a usable value", async () => {
+await section("a request without a valid cookie is refused", async () => {
     for (const [label, r] of cases) {
         mod.check(r);
         check(r.code === 401, label + " was not rejected (got " + r.code + ")");
@@ -192,44 +186,19 @@ await section("difficulty is clamped to a usable value", async () => {
     }
 });
 
-/* Re-screening must reach navigations only: the challenge page is not a valid
-   response to a fetch or an image request. RESCREEN_RATE is 0.02, so over 500
-   navigations some 401s are expected, and over 500 subresource requests none
-   are permitted. */
+/* The accept path is deterministic: a valid cookie is answered 204 on every
+   request, whatever the request is for. */
 const cookie = COOKIE_NAME + "=" + slot + "." + good;
-const rescreens = (dest) => {
-    let n = 0;
-    for (let i = 0; i < 500; i++) {
-        const r = makeR(cookie, "203.0.113.7", dest);
-        mod.check(r);
-        if (r.code === 401) n++;
-    }
-    return n;
-};
-await section("a request without a valid cookie is refused", async () => {
-    for (const dest of ["image", "empty", "script"]) {
-        const n = rescreens(dest);
-        check(n === 0, "Sec-Fetch-Dest: " + dest + " was re-screened " + n + " times");
-        console.log("  Sec-Fetch-Dest: " + dest.padEnd(8) + " -> " + n + " re-screens in 500");
-    }
-});
-const nav = rescreens("document") + rescreens(null);
-check(nav > 0, "no navigation was re-screened in 1000 requests (RESCREEN_RATE broken?)");
-console.log("  navigations                -> " + nav + " re-screens in 1000 (rate " +
-            (nav / 10).toFixed(1) + "%, configured 2%)");
-
-/* The accept path must be deterministic for a subresource request: a valid
-   cookie is always 204, never a stray re-screen. */
-let strays = 0;
-await section("a subresource is never re-screened", async () => {
+await section("a valid cookie is accepted on every request", async () => {
+    let strays = 0;
     for (let i = 0; i < 2000; i++) {
-        const r = makeR(cookie, "203.0.113.7", "empty");
+        const r = makeR(cookie);
         mod.check(r);
         if (r.code !== 204) strays++;
     }
+    check(strays === 0, "a valid cookie was refused " + strays + " times in 2000 requests");
+    console.log("  valid cookie, 2000 requests -> " + (2000 - strays) + " accepted");
 });
-check(strays === 0, "a valid cookie was rejected " + strays + " times in 2000 subresource requests");
-console.log("  valid cookie, 2000 subresource requests -> " + (2000 - strays) + " accepted");
 
 /* No configuration may skip verification. POW_BITS is clamped to at least 1,
    so no accepted value yields a difficulty of zero.
@@ -244,7 +213,7 @@ console.log("  valid cookie, 2000 subresource requests -> " + (2000 - strays) + 
 const VARIANT_OS = await import('node:os');
 const VARIANT_SRC = fs.readFileSync(new URL(MODULE_PATH), 'utf8');
 const VARIANT_DIR = fs.mkdtempSync(path.join(VARIANT_OS.tmpdir(), 'antibot-bits-'));
-const POW_BITS_LINE = /^const POW_BITS = -?\d+;$/m;
+const POW_BITS_LINE = /^const POW_BITS = [^;]+;$/m;
 if (!POW_BITS_LINE.test(VARIANT_SRC)) {
     throw new Error('POW_BITS declaration not found; the difficulty tests ' +
                     'would have graded the unmodified module');
@@ -272,20 +241,27 @@ const variantFor = (bits) => variantWith([['POW_BITS', bits]]);
 
 await section("no configuration skips verification", async () => {
 
-        for (const bits of [0, -1, 1, 22, 32, 99]) {
+        /* An invalid constant falls back to the built-in 22, and one past
+           POW_BITS_MAX is clamped to it, so no value yields a difficulty the
+           page cannot solve or one that verifies nothing. */
+        for (const [bits, want] of [[0, 22], [-1, 22], ['22.5', 22], [1, 1], [22, 22],
+                                    [32, 32], [33, 32], [99, 32]]) {
             const variant = await variantFor(bits);
             const r = makeR(null);
             variant.serve_challenge(r);
             const effective = Number(/,bits=(\d+);/.exec(r.body)[1]);
-            check(effective >= 1, 'POW_BITS=' + bits + ' yields difficulty ' + effective);
-            console.log('  POW_BITS=' + String(bits).padEnd(3) + ' -> difficulty ' + effective);
+            check(effective === want, 'POW_BITS=' + bits + ' yields difficulty ' +
+                  effective + ', expected ' + want);
+            console.log('  POW_BITS=' + String(bits).padEnd(4) + ' -> difficulty ' + effective);
         }
 
-        /* At 24 bits a guess passes with probability 2^-24. */
+        /* At 24 bits a guess passes with probability 2^-24. The cap at 24 bits
+           is 2^24 x 64 = 2^30, so the largest nonce tried sits just under it
+           and reaches pow_valid() rather than stopping at the parser. */
         const strict = await variantFor(24);
         const slotNow = Math.floor(Date.now() / 1000 / 21600);
         let accepted = 0;
-        for (const n of ['0', '1', '999999', '4294967295']) {
+        for (const n of ['0', '1', '999999', String(Math.pow(2, 30) - 1)]) {
             for (const slotTry of [slotNow, slotNow - 1]) {
                 const r = makeR(COOKIE_NAME + '=' + slotTry + '.' + n);
                 strict.check(r);
@@ -314,6 +290,11 @@ await section("no configuration skips verification", async () => {
             ['2001:db8:1:2::1',  '2001:db8:1:3::1'],
             ['not-an-ip:x',      'also-not-an-ip:y'],
             ['::ffff:999.999.999.999', '::ffff:99.99.99.99'],
+            /* One IPv4 client per address: translation and Teredo. */
+            ['64:ff9b::c000:201',    '64:ff9b::c633:6407'],
+            ['64:ff9b:1::c000:201',  '64:ff9b:1::c633:6407'],
+            ['2001:0:4136:e378:8000:63bf:3fff:fdd2',
+             '2001:0:4136:e378:8000:63bf:f3ff:fdd1'],
         ];
         const strictVariant = await variantFor(24);
         for (const [one, two] of distinct) {
@@ -323,11 +304,14 @@ await section("no configuration skips verification", async () => {
             console.log('  ' + one.padEnd(24) + ' vs ' + two.padEnd(22) +
                         (a1 !== b1 ? ' distinct' : ' SHARED'));
         }
-        /* The two spellings of one host must agree. */
-        check(challengeFor(strictVariant, '192.0.2.1') ===
-              challengeFor(strictVariant, '::ffff:192.0.2.1'),
-              '192.0.2.1 and ::ffff:192.0.2.1 were given different identities');
-        console.log('  192.0.2.1 and ::ffff:192.0.2.1 agree');
+        /* The spellings of one IPv4 client must agree. */
+        for (const spelling of ['::ffff:192.0.2.1', '64:ff9b::c000:201',
+                                '64:FF9B:0:0:0:0:C000:0201']) {
+            check(challengeFor(strictVariant, '192.0.2.1') ===
+                  challengeFor(strictVariant, spelling),
+                  '192.0.2.1 and ' + spelling + ' were given different identities');
+        }
+        console.log('  192.0.2.1, ::ffff:192.0.2.1 and 64:ff9b::c000:201 agree');
 
         /* The other half of the invariant. docs/security.md states the identity as
            the /64, and only the negative half was checked above. IPv6 privacy
@@ -362,9 +346,9 @@ await section("no configuration skips verification", async () => {
         }
         check(nonce >= 0, 'no nonce found at 20 bits');
         const cookie = COOKIE_NAME + '=' + slotValue + '.' + nonce;
-        const mine = makeR(cookie, own, 'empty');
+        const mine = makeR(cookie, own);
         replay.check(mine);
-        const theirs = makeR(cookie, other, 'empty');
+        const theirs = makeR(cookie, other);
         replay.check(theirs);
         check(mine.code === 204, 'own cookie rejected (' + mine.code + ')');
         check(theirs.code === 401, 'cookie accepted for another address');
@@ -422,7 +406,7 @@ await section("the difficulty the page ships does not decide acceptance", async 
         const nonce = solve(want, below);
         if (!check(nonce >= 0, 'no nonce found at ' + want + ' bits')) { continue; }
         const r = makeR(COOKIE_NAME + '=' + issuedSlot + '.' + nonce,
-                        '203.0.113.7', 'empty');
+                        '203.0.113.7');
         server.check(r);
         const wanted = below ? 401 : 204;
         check(r.code === wanted,
@@ -469,13 +453,31 @@ await section("the page solves in a browser-shaped environment", async () => {
               'page (' + label + ') set a cookie a browser would reject: ' +
               out.violations.join('; '));
 
-        const back = makeR(value, '203.0.113.7', 'empty');
+        const back = makeR(value, '203.0.113.7');
         mod.check(back);
         check(back.code === 204,
               'page (' + label + ') cookie rejected by check() (' + back.code + ')');
+
+        /* After the cookie, the page sends the solver that won and its rate
+           to the report location, which report() accepts. */
+        check(out.beacons.length === 1,
+              'page (' + label + ') sent ' + out.beacons.length + ' reports');
+        const sent = new URL(out.beacons[0] || '/', 'https://site.example');
+        const solver = options.withWebAssembly === false ? 'js' : 'wasm';
+        check(sent.pathname === '/__antibot_report',
+              'page (' + label + ') reported to ' + sent.pathname);
+        check(sent.searchParams.get('solver') === solver,
+              'page (' + label + ') reported solver=' + sent.searchParams.get('solver') +
+              ', expected ' + solver);
+        check(/^[1-9][0-9]*$/.test(sent.searchParams.get('rate') || ''),
+              'page (' + label + ') reported rate=' + sent.searchParams.get('rate'));
+        const rep = makeR(value, '203.0.113.7');
+        rep.args = Object.fromEntries(sent.searchParams);
+        mod.report(rep);
+        check(rep.code === 204, 'page (' + label + ') report was answered ' + rep.code);
         console.log('  page ' + label.padEnd(15) + ' ' + secs + 's, ' + out.workers +
                     ' worker(s), progress ' + JSON.stringify(out.progress) +
-                    ', check() ' + back.code);
+                    ', check() ' + back.code + ', reported ' + sent.search);
     }
 });
 
@@ -578,17 +580,54 @@ await section("settings are read from the environment", async () => {
            out-of-range constant does. */
         const bad = await withEnv({
             ANTIBOT_POW_BITS: 'notanumber', ANTIBOT_WINDOW_SIZE: '5',
-            ANTIBOT_COOKIE_NAME: 'bad;name', ANTIBOT_RESCREEN_RATE: '1'
+            ANTIBOT_COOKIE_NAME: 'bad;name'
         });
         check(bad.bits === 22, 'a non-numeric ANTIBOT_POW_BITS served bits=' + bad.bits);
         check(bad.cookie === COOKIE_NAME,
               'an invalid ANTIBOT_COOKIE_NAME served ' + bad.cookie);
-        for (const want of ['ANTIBOT_POW_BITS=notanumber', 'WINDOW_SIZE=5',
-                            'COOKIE_NAME=bad;name', 'RESCREEN_RATE=1']) {
+        for (const want of ['ANTIBOT_POW_BITS=notanumber', 'ANTIBOT_WINDOW_SIZE=5',
+                            'ANTIBOT_COOKIE_NAME=bad;name']) {
             check(bad.logged.indexOf(want) !== -1,
                   'no error-log line for ' + want + '; logged: ' + bad.logged);
         }
-        console.log('  environment: 4 out-of-range values fell back and were reported');
+        console.log('  environment: 3 out-of-range values fell back and were reported');
+
+        /* A number is decimal digits and nothing else. Number() reads
+           whitespace as 0 and accepts hexadecimal, an exponent and a fraction,
+           and each of those once set the difficulty to 16, or to 24 unreported. */
+        let parsed = 0;
+        for (const value of ['0', '-24', '22.5', ' ', '\t', '0x18', '1e1', '+8', '8 ']) {
+            const got = await withEnv({ ANTIBOT_POW_BITS: value });
+            check(got.bits === 22, 'ANTIBOT_POW_BITS=' + JSON.stringify(value) +
+                  ' served bits=' + got.bits + ', expected the default 22');
+            check(got.logged.indexOf('ANTIBOT_POW_BITS=' + value + ' is not') !== -1,
+                  'ANTIBOT_POW_BITS=' + JSON.stringify(value) + ' was not reported: ' +
+                  got.logged);
+            parsed++;
+        }
+        check(parsed === 9, 'only ' + parsed + ' of 9 malformed difficulties ran');
+        console.log('  environment: 9 malformed difficulties fell back to 22 and were reported');
+
+        /* A lifetime is reported for the rule it breaks. */
+        const frac = await withEnv({ ANTIBOT_COOKIE_TTL: '50000.5' });
+        check(frac.maxAge === 43200, 'ANTIBOT_COOKIE_TTL=50000.5 served Max-Age=' + frac.maxAge);
+        check(frac.logged.indexOf('ANTIBOT_COOKIE_TTL=50000.5 is not a whole number') !== -1,
+              'a fractional lifetime was reported as ' + JSON.stringify(frac.logged));
+        const huge = await withEnv({ ANTIBOT_COOKIE_TTL: '1e21' });
+        check(huge.maxAge === 43200 && huge.logged.indexOf('ANTIBOT_COOKIE_TTL=1e21 is not') !== -1,
+              'ANTIBOT_COOKIE_TTL=1e21 served Max-Age=' + huge.maxAge + ' and logged ' +
+              JSON.stringify(huge.logged));
+        const short = await withEnv({ ANTIBOT_COOKIE_TTL: '600' });
+        check(short.logged.indexOf('ANTIBOT_COOKIE_TTL=600 is below twice WINDOW_SIZE=43200') !== -1,
+              'a short lifetime was reported as ' + JSON.stringify(short.logged));
+
+        /* The lifetime follows the window it is derived from, and a longer
+           window alone is a valid configuration that reports nothing. */
+        const day = await withEnv({ ANTIBOT_WINDOW_SIZE: '86400' });
+        check(day.maxAge === 172800, 'ANTIBOT_WINDOW_SIZE=86400 served Max-Age=' + day.maxAge);
+        check(day.logged === '', 'ANTIBOT_WINDOW_SIZE=86400 alone reported: ' + day.logged);
+        console.log('  environment: lifetimes reported by rule; a 1-day window gives Max-Age=' +
+                    day.maxAge + ' and no report');
 
         /* A name without the prefix is kept, and the guarantee it drops is said. */
         const loose = await withEnv({ ANTIBOT_COOKIE_NAME: 'plain-name' });
@@ -654,46 +693,45 @@ await section("the challenge log line is written at the configured level", async
     check(ran === 6, 'only ' + ran + ' of 6 level cases ran');
 });
 
-/* RESCREEN_RATE and COOKIE_TTL are checked at load the way POW_BITS is. Both
-   break a visitor rather than an attacker: a rate of 1 challenges every
-   navigation that holds a valid cookie, and a lifetime below the acceptance
-   window has the browser drop the cookie while the module would still take
-   it. Either leaves the visitor solving and reloading without end. */
-await section("the constants that trap a visitor are validated", async () => {
-        const WINDOW = 6 * 60 * 60;
-        for (const [value, expected] of [['1', 0.02], ['-0.5', 0.02], ['2', 0.02],
-                                         ['0', 0], ['0.5', 0.5]]) {
-            /* Measure the rate the module actually applies: navigations holding a
-               cookie the module refuses are 401 either way, so this uses a valid
-               one at 1 bit and counts how often a navigation is turned away. */
-            const bits = 1;
-            const v = await variantWith([['RESCREEN_RATE', value], ['POW_BITS', String(bits)]]);
-            const served = makeR(null, '203.0.113.90');
-            v.serve_challenge(served);
-            const challenge = /var challenge="([0-9a-f]+)"/.exec(served.body)[1];
-            const issued = /var slot="(\d+)"/.exec(served.body)[1];
-            let nonce = 0;
-            while ((parseInt(crypto.createHash('sha256')
-                       .update(challenge + ':' + nonce).digest('hex')[0], 16) >> 3) !== 0) nonce++;
-            const cookie = COOKIE_NAME + '=' + issued + '.' + nonce;
-            const N = 4000;
-            let turned = 0;
-            for (let i = 0; i < N; i++) {
-                const r = makeR(cookie, '203.0.113.90', 'document');
-                v.check(r);
-                if (r.code === 401) turned++;
-            }
-            const observed = turned / N;
-            const slack = 4 * Math.sqrt(Math.max(expected, 1 / N) * (1 - expected) / N);
-            check(Math.abs(observed - expected) <= slack + 0.005,
-                  'RESCREEN_RATE=' + value + ' applied ' + observed.toFixed(3) +
-                  ', expected about ' + expected);
-            console.log('  RESCREEN_RATE=' + String(value).padEnd(5) + ' -> ' +
-                        observed.toFixed(3) + ' (expected ' + expected + ')');
-        }
+/* A constant in the source is validated the way an environment value is, and
+   one that is invalid falls back to the built-in value rather than being
+   kept. A window of 0 once put slot=Infinity in the page and locked every
+   visitor out; a cookie lifetime below the acceptance window has the browser
+   drop the cookie while the module would still take it. */
+await section("a constant in the source is validated like the environment", async () => {
+        const served = async (decls) => {
+            const v = await variantWith(decls);
+            const logged = [];
+            const r = makeR(null, '203.0.113.91');
+            r.error = (m) => logged.push(m);
+            v.serve_challenge(r);
+            const st = makeR(null);
+            v.status(st);
+            return {
+                slot: /var slot="([^"]*)"/.exec(r.body)[1],
+                cookie: /var v="([^"=]+)="/.exec(r.body)[1],
+                maxAge: Number(/Max-Age=(\d+)/.exec(r.body)[1]),
+                window: Number(/^window (\d+)$/m.exec(st.body)[1]),
+                logged: logged.join(' | ')
+            };
+        };
+        const zero = await served([['WINDOW_SIZE', '0']]);
+        check(zero.window === 21600 && /^\d+$/.test(zero.slot),
+              'WINDOW_SIZE = 0 gave window ' + zero.window + ' and slot ' + zero.slot);
+        check(zero.logged.indexOf('WINDOW_SIZE=0 is not an integer') !== -1,
+              'WINDOW_SIZE = 0 was not reported: ' + zero.logged);
+        const name = await served([['COOKIE_NAME', '"bad;name"']]);
+        check(name.cookie === '__Host-antibot-ac',
+              'COOKIE_NAME = "bad;name" served ' + name.cookie);
+        check(name.logged.indexOf('COOKIE_NAME=bad;name is not a cookie name') !== -1,
+              'COOKIE_NAME = "bad;name" was not reported: ' + name.logged);
+        console.log('  source: WINDOW_SIZE = 0 -> ' + zero.window + ', COOKIE_NAME = "bad;name" -> ' +
+                    name.cookie + ', both reported');
 
+        const WINDOW = 6 * 60 * 60;
         for (const [value, expected] of [['1', 2 * WINDOW], ['0', 2 * WINDOW],
-                                         ['-1', 2 * WINDOW], ['2 * WINDOW_SIZE', 2 * WINDOW],
+                                         ['-1', 2 * WINDOW], ['50000.5', 2 * WINDOW],
+                                         ['null', 2 * WINDOW], ['2 * WINDOW_SIZE', 2 * WINDOW],
                                          ['99999999', 99999999]]) {
             const v = await variantWith([['COOKIE_TTL', value]]);
             const r = makeR(null);
@@ -749,17 +787,53 @@ await section("a valid cookie is found within the candidate bound", async () => 
 
         for (let ahead = 0; ahead < bound; ahead++) {
             const header = ahead === 0 ? good : junk(ahead) + '; ' + good;
-            const r = makeR(header, address, 'empty');
+            const r = makeR(header, address);
             variant.check(r);
             check(r.code === 204, 'a valid cookie behind ' + ahead +
                   ' others was answered ' + r.code + ', within the bound of ' + bound);
         }
-        const past = makeR(junk(bound) + '; ' + good, address, 'empty');
+        const past = makeR(junk(bound) + '; ' + good, address);
         variant.check(past);
         check(past.code === 401, 'a valid cookie behind ' + bound +
               ' others was answered ' + past.code + ', past the bound of ' + bound);
         console.log('  cookie candidates: found behind 0 to ' + (bound - 1) +
                     ' others, refused behind ' + bound);
+});
+
+/* The page's workers scan the nonces below POW_MAX_ITERATIONS, so the server
+   refuses a nonce at the cap. At 4 bits the cap is 2^4 x 64 = 1024, and an
+   identity whose challenge is met by both 1023 and 1024 tells the two sides
+   apart: 1023 is accepted and 1024 is refused for being at the cap, not for
+   its digest. */
+await section("a nonce at the iteration cap is refused", async () => {
+        const v = await variantFor(4);
+        const meets4 = (ch, n) => crypto.createHash('sha256').update(ch + ':' + n)
+                                        .digest()[0] >> 4 === 0;
+        let found = null;
+        for (let i = 0; i < 20000 && found === null; i++) {
+            const address = '198.51.' + (i >> 8) + '.' + (i & 255);
+            const r = makeR(null, address);
+            v.serve_challenge(r);
+            const ch = /var challenge="([0-9a-f]+)"/.exec(r.body)[1];
+            const cap = Number(/,cap=(\d+);/.exec(r.body)[1]);
+            if (meets4(ch, cap - 1) && meets4(ch, cap)) {
+                found = { address, cap, issued: /var slot="(\d+)"/.exec(r.body)[1] };
+            }
+        }
+        check(found !== null, 'no identity met 4 bits at both 1023 and 1024');
+        if (found !== null) {
+            check(found.cap === 1024, 'the cap at 4 bits is ' + found.cap);
+            const at = (n) => {
+                const r = makeR(COOKIE_NAME + '=' + found.issued + '.' + n, found.address);
+                v.check(r);
+                return r.code;
+            };
+            check(at(found.cap - 1) === 204, 'the nonce below the cap was answered ' +
+                  at(found.cap - 1));
+            check(at(found.cap) === 401, 'the nonce at the cap was answered ' + at(found.cap));
+            console.log('  cap ' + found.cap + ': ' + (found.cap - 1) + ' -> ' +
+                        at(found.cap - 1) + ', ' + found.cap + ' -> ' + at(found.cap));
+        }
 });
 
 /* A cookie is accepted for its own slot and the one after it, which is what
@@ -792,12 +866,12 @@ await section("a cookie works across the slot boundary and no further", async ()
         } finally {
             Date.now = realNow;
         }
-        const now = makeR(cookie, '203.0.113.44', 'empty');
+        const now = makeR(cookie, '203.0.113.44');
         variant.check(now);
         check(now.code === 204,
               'a cookie solved in the previous slot was answered ' + now.code);
         const older = makeR(cookie.replace('=' + (slotNow - 1) + '.', '=' + (slotNow - 2) + '.'),
-                            '203.0.113.44', 'empty');
+                            '203.0.113.44');
         variant.check(older);
         check(older.code === 401,
               'a cookie two slots old was answered ' + older.code);
@@ -895,35 +969,42 @@ await section("the cookie collector matches the one it replaced", async () => {
 const median3 = (f) => [f(), f(), f()].sort((a, b) => a - b)[1];
 
 /* The identity is attacker-controlled and hashed on every request, so its
-   cost must not track header size. Comparing totals would also measure the
-   header parsing, which grows with size whatever the module does, so each
-   measurement subtracts the same request without a cookie: what remains is
-   the hashing. */
+   cost must not track header size, for either header it is built from.
+   Comparing totals would also measure the header parsing, which grows with
+   size whatever the module does, so each measurement subtracts the same
+   request without a cookie: what remains is the hashing. The assertion is on
+   growth from 8 KB to 64 KB, not on a ratio against a short header, for the
+   reason the address test below gives. Without the clip, Accept-Language took
+   this to 4.54x. */
 await section("hashing does not track header size", async () => {
-        const timeWith = (ua, cookie) => {
-            const N = 2000;
+        const timeWith = (header, value, cookie) => {
+            const N = 1000;
             const one = () => {
-                const r = makeR(cookie, '203.0.113.9', 'empty');
-                r.headersIn['User-Agent'] = ua;
+                const r = makeR(cookie, '203.0.113.9');
+                r.headersIn[header] = value;
                 return r;
             };
-            one();
+            for (let i = 0; i < 100; i++) mod.check(one());
             const t = process.hrtime.bigint();
             for (let i = 0; i < N; i++) mod.check(one());
             return Number(process.hrtime.bigint() - t) / 1000 / N;
         };
         const withCookie = COOKIE_NAME + '=' + slot + '.123456789';
-        const hashing = (ua) =>
-            median3(() => timeWith(ua, withCookie) - timeWith(ua, null));
+        const hashing = (header, value) =>
+            median3(() => timeWith(header, value, withCookie) - timeWith(header, value, null));
 
-        const short = hashing('Mozilla/5.0');
-        const long = hashing('M'.repeat(8192));
-        const ratio = long / short;
-        check(ratio < 2, 'hashing an 8 KB header costs ' + ratio.toFixed(2) +
-                         'x a short one; the identity is not being clipped');
-        console.log('  hashing work: short header ' + short.toFixed(1) +
-                    ' us, 8 KB header ' + long.toFixed(1) +
-                    ' us, ratio ' + ratio.toFixed(2));
+        let ran = 0;
+        for (const header of ['User-Agent', 'Accept-Language']) {
+            const big = hashing(header, 'M'.repeat(8192));
+            const bigger = hashing(header, 'M'.repeat(65536));
+            const growth = bigger / big;
+            check(growth < 2, 'hashing a 64 KB ' + header + ' costs ' + growth.toFixed(2) +
+                             'x an 8 KB one; the identity is not being clipped');
+            ran++;
+            console.log('  hashing work, ' + header.padEnd(15) + ': 8 KB ' + big.toFixed(1) +
+                        ' us, 64 KB ' + bigger.toFixed(1) + ' us, growth ' + growth.toFixed(2) + 'x');
+        }
+        check(ran === 2, 'only ' + ran + ' of 2 identity headers were measured');
 });
 
 /* The address is attacker-controlled too when real_ip_header is set, and it
@@ -940,7 +1021,7 @@ await section("the request cost does not track address size", async () => {
         const cost = (address) => {
             const N = 1000;
             const one = () => makeR(COOKIE_NAME + '=' + slot + '.123456789',
-                                    address, 'empty');
+                                    address);
             for (let i = 0; i < 300; i++) mod.check(one());
             const t = process.hrtime.bigint();
             for (let i = 0; i < N; i++) mod.check(one());
@@ -968,7 +1049,7 @@ await section("the request cost does not track address size", async () => {
 await section("the request cost does not track cookie count", async () => {
         const cost = (cookie) => {
             const N = 500;
-            const one = () => makeR(cookie, '203.0.113.9', 'empty');
+            const one = () => makeR(cookie, '203.0.113.9');
             for (let i = 0; i < 200; i++) mod.check(one());
             const t = process.hrtime.bigint();
             for (let i = 0; i < N; i++) mod.check(one());
@@ -986,14 +1067,14 @@ await section("the request cost does not track cookie count", async () => {
                     ' us, growth ' + growth.toFixed(2) + 'x');
 });
 
-/* nginx writes one error-log line per call and $uri is percent-decoded, so a
-   request for /a%0Ab reaches the module with a newline in it. Every field the
-   module logs is encoded first, and the challenge goes to the info level
-   because one is served for every request that arrives without a cookie. */
+/* nginx writes one error-log line per call. The line carries $request_uri,
+   what the client asked for, because after error_page r.uri is the internal
+   location. Every field the module logs is encoded first, so a newline in one
+   cannot start a line of its own. */
 await section("the log line survives a URI with a newline", async () => {
         const LF = String.fromCharCode(10);
         const r = makeR(null, '203.0.113.9');
-        r.uri = '/a' + LF + 'antibot: forged';
+        r.variables.request_uri = '/a' + LF + 'antibot: forged';
         mod.serve_challenge(r);
         check(r.logged.length === 1,
               'serve_challenge wrote ' + r.logged.length + ' log lines, expected 1');
@@ -1002,8 +1083,10 @@ await section("the log line survives a URI with a newline", async () => {
               'a newline in the URI survived into the log line');
         check(line.indexOf('/a\\x0aantibot: forged') !== -1,
               'the URI was not encoded in the log line: ' + JSON.stringify(line));
+        check(line.indexOf('__antibot_challenge') === -1,
+              'the log line names the internal location: ' + JSON.stringify(line));
         const wide = makeR(null, '203.0.113.9');
-        wide.uri = '/' + String.fromCodePoint(0x1f600);
+        wide.variables.request_uri = '/' + String.fromCodePoint(0x1f600);
         mod.serve_challenge(wide);
         check(wide.logged[0].indexOf('\\ud83d') !== -1,
               'a non-ASCII URI was not encoded: ' + JSON.stringify(wide.logged[0]));
@@ -1097,13 +1180,48 @@ await section("the counters report what the module did", async () => {
         let nonce = 0;
         while (crypto.createHash('sha256').update(challenge + ':' + nonce)
                      .digest('hex').slice(0, 3) !== '000') nonce++;
-        const ok = makeR(COOKIE_NAME + '=' + issued + '.' + nonce, '203.0.113.72', 'empty');
+        const ok = makeR(COOKIE_NAME + '=' + issued + '.' + nonce, '203.0.113.72');
         solved.check(ok);
         check(ok.code === 204, 'the solved cookie was answered ' + ok.code);
         check(read().accepted === '1',
               'one acceptance was counted as ' + read().accepted);
-        console.log('  counters: 5 rejected, 4 challenges, 1 accepted, and ' +
-                    'zone missing reported without one');
+
+        /* A report counts its solver, and counts a solve as slow when the
+           reported rate puts the mean solve at this difficulty above ten
+           seconds. 2^22 hashes at 419,431 per second is 10.0 s. */
+        const send = (args) => {
+            const r = makeR(null, '203.0.113.73');
+            r.args = args;
+            const seen = [];
+            r.log = (m) => seen.push(m);
+            counted.report(r);
+            return { code: r.code, seen };
+        };
+        const fast = send({ solver: 'wasm', rate: '8400000' });
+        check(fast.code === 204, 'a valid report was answered ' + fast.code);
+        check(fast.seen.some((m) => m.indexOf('solver=wasm rate=8400000') !== -1),
+              'a report was not logged: ' + JSON.stringify(fast.seen));
+        send({ solver: 'js', rate: '132000' });
+        send({ solver: 'wasm', rate: '419431' });
+        send({ solver: 'wasm', rate: '419430' });
+        let refused = 0;
+        for (const args of [{}, { solver: 'wasm' }, { rate: '1' },
+                            { solver: 'gpu', rate: '1' }, { solver: 'js', rate: '1.5' },
+                            { solver: 'js', rate: '' }, { solver: 'js', rate: '1e9' },
+                            { solver: ['js', 'js'], rate: '1' },
+                            { solver: 'js', rate: '1234567890123' }]) {
+            if (send(args).code === 400) refused++;
+        }
+        check(refused === 9, refused + ' of 9 malformed reports were refused');
+        const tally = read();
+        check(tally.solved_wasm === '3' && tally.solved_js === '1',
+              'four reports were counted as wasm=' + tally.solved_wasm +
+              ' js=' + tally.solved_js);
+        check(tally.solved_slow === '2',
+              'two slow solves were counted as ' + tally.solved_slow);
+        check(tally.window === '21600', 'status reported window ' + tally.window);
+        console.log('  counters: 5 rejected, 4 challenges, 1 accepted, 4 reports ' +
+                    '(2 slow), 9 malformed refused, and zone missing reported without one');
     } finally {
         if (saved === undefined) delete globalThis.ngx;
         else globalThis.ngx = saved;
@@ -1178,7 +1296,7 @@ await section("a cookie is refused by a host configured differently", async () =
         while (!(meets(challenge, nonce, 10) && !meets(challenge, nonce, 24))) nonce++;
         const cookie = name + '=' + slot + '.' + nonce;
 
-        const own = makeR(cookie, ADDRESS, 'empty');
+        const own = makeR(cookie, ADDRESS);
         home.check(own);
         check(own.code === 204, 'the host that issued the challenge answered ' + own.code);
 
@@ -1188,7 +1306,7 @@ await section("a cookie is refused by a host configured differently", async () =
                                         ['ANTIBOT_COOKIE_NAME', '__Host-other']]) {
             set({ ...BASE, [setting]: value });
             const other = await variantWith([]);
-            const r = makeR(cookie, ADDRESS, 'empty');
+            const r = makeR(cookie, ADDRESS);
             other.check(r);
             check(r.code === 401, 'a host differing only in ' + setting +
                   ' answered ' + r.code + ', so the mismatch went unnoticed');

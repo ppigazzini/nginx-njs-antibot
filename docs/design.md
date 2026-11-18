@@ -26,8 +26,11 @@ them. Widths change only at powers of ten.
 
 **No division in the hot loop.** Consecutive nonces differ by one decimal
 digit almost always, so the nonce is incremented in place in the block rather
-than re-derived. wasm32 has no 64-bit divide instruction and would otherwise
-call a software routine on every attempt.
+than re-derived, which divides by ten per digit. A clang 18 build that
+re-derives every lane of every group with `build_final_block()` runs 20 to 21
+percent slower: 6.82 to 6.93M hashes/sec against 8.64 to 8.65M for the
+in-place increment, medians of three runs of `test/bench/rate.mjs` on the
+[reference core](security.md#solver-rates).
 
 ## The wasm solver
 
@@ -74,7 +77,9 @@ fail before the fallback could run.
 
 Workers are spawned at `navigator.hardwareConcurrency / 2`, clamped to 1..8.
 Each worker owns every n-th block of 262,144 nonces, so the ranges never
-overlap and their union covers the whole space below the cap.
+overlap and their union covers the whole space below the cap. The worker that
+finds the nonce names the solver it ran, which the page sends in its
+[solve report](configuration.md#the-solve-report).
 
 The workers share nothing: each scans its own stride of the nonce space, so
 the search needs no shared memory and the site needs no

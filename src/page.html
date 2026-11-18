@@ -16,14 +16,28 @@ __ANTIBOT_HEADING__<p>Verifying you are not a bot&hellip;</p>
   var challenge="__ANTIBOT_CHALLENGE__",bits=__ANTIBOT_BITS__;
   var slot="__ANTIBOT_SLOT__",cap=__ANTIBOT_CAP__;
   var expected=__ANTIBOT_EXPECTED__;
-  var pctEl=document.getElementById("pct");
-  function finish(nonce){
+  var pctEl=document.getElementById("pct"),began=0;
+  function finish(nonce,solver){
     var v="__ANTIBOT_COOKIE_NAME__="+slot+"."+nonce;
     try{
       document.cookie=v+";Path=/;Max-Age=__ANTIBOT_COOKIE_TTL__;SameSite=Lax;Secure";
       if(String(document.cookie).indexOf(v)===-1){fail();return;}
     }catch(err){fail();return;}
+    report(nonce,solver);
     setTimeout(function(){location.reload();},50);
+  }
+  /* The workers scan interleaved blocks at one speed, so the nonces below the
+     winning one are about the number tried. Sent after the cookie is written,
+     because the report location is gated by it. */
+  function report(nonce,solver){
+    try{
+      var secs=Math.max(0.001,(new Date().getTime()-began)/1000);
+      var rate=Math.round((Number(nonce)+1)/secs);
+      if(navigator.sendBeacon){
+        navigator.sendBeacon("__ANTIBOT_REPORT_PATH__?solver="+
+          (solver==="wasm"?"wasm":"js")+"&rate="+rate);
+      }
+    }catch(err){}
   }
   function fail(){
     var e=document.getElementById("err");if(e){e.hidden=false;}
@@ -42,7 +56,7 @@ __ANTIBOT_HEADING__<p>Verifying you are not a bot&hellip;</p>
     for(var j=0;j<workers.length;j++){try{workers[j].terminate();}catch(err){}}
     try{URL.revokeObjectURL(url);}catch(err){}
   }
-  function won(nonce){if(over){return;}over=true;stopAll();finish(nonce);}
+  function won(nonce,solver){if(over){return;}over=true;stopAll();finish(nonce,solver);}
   function lost(){if(over){return;}dead++;
     if(dead>=workers.length){over=true;stopAll();fail();}}
   function render(){
@@ -58,13 +72,14 @@ __ANTIBOT_HEADING__<p>Verifying you are not a bot&hellip;</p>
       progress.push(0);
       wk.onerror=function(){lost();};
       wk.onmessage=(function(idx){return function(ev){
-        if(ev.data.n!==undefined){won(ev.data.n);return;}
+        if(ev.data.n!==undefined){won(ev.data.n,ev.data.s);return;}
         if(ev.data.f){lost();return;}
         if(ev.data.p!==undefined){progress[idx]=ev.data.p;render();}
       };})(j);
       workers.push(wk);
     }
     if(workers.length===0){fail();return;}
+    began=new Date().getTime();
     for(j=0;j<workers.length;j++){
       workers[j].postMessage({c:challenge,b:bits,m:cap,mod:mod,l:j,k:workers.length});
     }

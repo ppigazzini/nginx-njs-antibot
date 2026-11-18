@@ -4,13 +4,14 @@
  *   node test/module-fuzz.mjs [module] [iterations] [seed]
  *
  * Everything the module reads from a request is attacker-controlled: the
- * cookie header, the User-Agent, the Accept-Language, Sec-Fetch-Dest and,
- * where real_ip_header is configured, the address. Only the solver was ever
- * fuzzed; this covers the parsers.
+ * cookie header, the User-Agent, the Accept-Language, the arguments of a
+ * report and, where real_ip_header is configured, the address. Only the
+ * solver was ever fuzzed; this covers the parsers.
  *
  * Three properties hold for any input:
  *
- *   1. Neither entry point throws, and check() answers 204, 401 or 500.
+ *   1. No entry point throws, check() answers 204, 401 or 500, and report()
+ *      answers 204 or 400.
  *   2. A 204 is only ever returned for a nonce whose digest really meets the
  *      difficulty. That is verified against the challenge the module itself
  *      issues for the same identity, so it cannot pass by coincidence.
@@ -91,7 +92,16 @@ const pick = (a) => a[rand(a.length)];
 const repeat = (s, n) => s.repeat(n);
 
 const NAME = '__Host-antibot-ac';
-const slot = Math.floor(Date.now() / 1000 / 21600);
+
+/* The window the module runs with, read from status() rather than assumed,
+   so ANTIBOT_WINDOW_SIZE in the environment moves this suite with it. */
+const windowOf = (mod) => {
+    const r = { headersOut: {}, return(code, body) { this.body = body; } };
+    mod.status(r);
+    return Number(/^window (\d+)$/m.exec(r.body)[1]);
+};
+const shipped = (await import(MODULE_PATH)).default;
+const slot = Math.floor(Date.now() / 1000 / windowOf(shipped));
 
 /* Shapes worth hitting deliberately, mixed in with the random ones. */
 const corpus = [
@@ -107,7 +117,6 @@ const corpus = [
 const addresses = ['', ' ', '1.2.3.4', '::1', '::ffff:1.2.3.4', 'unix:',
                    'unix:/var/run/x.sock', repeat(':', 2000),
                    repeat('a', 300) + ':' + repeat('b', 300), 'not-an-ip:x'];
-const dests = [undefined, 'document', 'empty', 'image', repeat('x', 500)];
 
 const bytes = (n) => {
     let out = '';
@@ -118,12 +127,12 @@ const bytes = (n) => {
 let failures = 0;
 const fail = (msg) => { failures++; console.log('  FAIL: ' + msg); };
 
-const request = (cookie, address, dest, ua, lang) => {
+const request = (cookie, address, ua, lang, args) => {
     const headersIn = { 'User-Agent': ua, 'Accept-Language': lang };
     if (cookie !== undefined) headersIn.Cookie = cookie;
-    if (dest !== undefined) headersIn['Sec-Fetch-Dest'] = dest;
     return {
-        remoteAddress: address, uri: '/', headersIn, headersOut: {},
+        remoteAddress: address, uri: '/__antibot_challenge', headersIn, headersOut: {},
+        variables: { request_uri: '/' }, args: args || {},
         error() {}, warn() {}, log() {},
         return(code, body) { this.code = code; this.body = body; }
     };
@@ -133,14 +142,14 @@ const request = (cookie, address, dest, ua, lang) => {
    clock is moved rather than the derivation reimplemented here, so what the
    check compares against is the module's own answer. */
 const challengeCache = new Map();
-const challengeOf = (mod, address, dest, ua, lang, back) => {
+const challengeOf = (mod, address, ua, lang, back) => {
     const key = back + '\u0000' + address + '\u0000' + ua + '\u0000' + lang;
     if (challengeCache.has(key)) return challengeCache.get(key);
     const realNow = Date.now;
     let out = null;
     try {
-        if (back) Date.now = () => realNow() - back * 21600 * 1000;
-        const r = request(undefined, address, dest, ua, lang);
+        if (back) Date.now = () => realNow() - back * windowOf(mod) * 1000;
+        const r = request(undefined, address, ua, lang);
         mod.serve_challenge(r);
         if (r.code !== 500) {
             out = {
@@ -167,10 +176,10 @@ const meets = (challenge, nonce, bits) => {
 const solvedFor = (mod, identities) => {
     const out = [];
     for (const id of identities) {
-        const c = challengeOf(mod, id.address, 'empty', id.ua, id.lang);
+        const c = challengeOf(mod, id.address, id.ua, id.lang);
         let nonce = 0;
         while (!meets(c.challenge, String(nonce), c.bits)) nonce++;
-        out.push({ ...id, cookie: NAME + '=' + slot + '.' + nonce });
+        out.push({ ...id, cookie: NAME + '=' + c.slot + '.' + nonce });
     }
     return out;
 };
@@ -181,9 +190,23 @@ const mutate = (s) => {
            s.slice(i + 1);
 };
 
+/* A report's arguments: the two the page sends, and anything else. njs gives
+   a repeated argument as an array. */
+const reportArgs = () => {
+    const value = () => rand(4) === 0 ? [bytes(rand(8)), bytes(rand(8))]
+                      : rand(3) === 0 ? pick(['wasm', 'js', '', '0', '1e9', '-1', ' 1'])
+                      : rand(2) === 0 ? String(rand(1e13)) : bytes(rand(30));
+    const args = {};
+    if (rand(5) !== 0) args.solver = value();
+    if (rand(5) !== 0) args.rate = value();
+    if (rand(4) === 0) args[bytes(rand(10))] = value();
+    return args;
+};
+
 function fuzz(mod, label, count, solved) {
     const counts = { 204: 0, 401: 0, 500: 0, other: 0 };
     let verified = 0, mutantsRejected = 0;
+    const reports = {};
 
     for (let i = 0; i < count; i++) {
         /* One iteration in four draws a solved identity, so the accept path is
@@ -201,11 +224,10 @@ function fuzz(mod, label, count, solved) {
         }
         const address = id ? id.address
                        : rand(4) === 0 ? bytes(rand(40)) : pick(addresses);
-        const dest = id ? 'empty' : pick(dests);
         const ua = id ? id.ua : rand(6) === 0 ? bytes(rand(300)) : 'Mozilla/5.0';
         const lang = id ? id.lang : rand(8) === 0 ? bytes(rand(60)) : 'en-US';
 
-        const r = request(cookie, address, dest, ua, lang);
+        const r = request(cookie, address, ua, lang);
         try {
             mod.check(r);
         } catch (err) {
@@ -244,7 +266,7 @@ function fuzz(mod, label, count, solved) {
             let justified = false, serves = true;
             for (const cand of candidates) {
                 for (const back of [0, 1]) {
-                    const c = challengeOf(mod, address, dest, ua, lang, back);
+                    const c = challengeOf(mod, address, ua, lang, back);
                     if (c === null) { serves = false; continue; }
                     if (String(c.slot) !== cand.slot) continue;
                     if (meets(c.challenge, cand.nonce, c.bits)) justified = true;
@@ -260,8 +282,23 @@ function fuzz(mod, label, count, solved) {
             }
         }
 
+        if (rand(10) === 0) {
+            const rep = request(cookie, address, ua, lang, reportArgs());
+            try {
+                mod.report(rep);
+            } catch (err) {
+                fail(label + ': report threw for args=' +
+                     JSON.stringify(rep.args).slice(0, 80) + ': ' + err.message);
+                continue;
+            }
+            if (rep.code !== 204 && rep.code !== 400) {
+                fail(label + ': report answered ' + rep.code);
+            }
+            reports[rep.code] = (reports[rep.code] || 0) + 1;
+        }
+
         if (rand(50) === 0) {
-            const page = request(undefined, address, dest, ua, lang);
+            const page = request(undefined, address, ua, lang);
             try {
                 mod.serve_challenge(page);
             } catch (err) {
@@ -280,12 +317,13 @@ function fuzz(mod, label, count, solved) {
 
     console.log('  ' + label.padEnd(22) + count.toLocaleString('en-US') + ' requests: ' +
                 counts[401] + ' rejected, ' + counts[204] + ' accepted (' + verified +
-                ' verified), ' + counts[500] + ' misconfigured, ' + counts.other + ' other');
-    return { counts, verified, mutantsRejected };
+                ' verified), ' + counts[500] + ' misconfigured, ' + counts.other +
+                ' other; reports ' + (reports[204] || 0) + ' taken, ' +
+                (reports[400] || 0) + ' refused');
+    return { counts, verified, mutantsRejected, reports };
 }
 
 /* Pass 1: the shipped artifact, at its own difficulty. */
-const shipped = (await import(MODULE_PATH)).default;
 const robustness = fuzz(shipped, 'shipped', iterations, []);
 
 /* Pass 2: a variant low enough to solve, so property 2 executes. */
@@ -310,6 +348,12 @@ const misconfigured = fuzz(unconfigured, 'no secret', 2000, []);
    one failing says which, and the rest still report. */
 await test('the shipped pass rejects what it is given', () => {
     if (robustness.counts[401] === 0) fail('the shipped pass rejected nothing');
+});
+await test('report() both takes and refuses what the shipped pass sends it', () => {
+    if (!robustness.reports[204] || !robustness.reports[400]) {
+        fail('the shipped pass took ' + (robustness.reports[204] || 0) + ' reports and refused ' +
+             (robustness.reports[400] || 0) + '; one side of report() did not execute');
+    }
 });
 await test('the accept pass reaches an acceptance and verifies it', () => {
     if (accept.verified === 0) {

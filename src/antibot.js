@@ -10,20 +10,19 @@ import cryptoModule from 'crypto';
 // 401 when it does not. serve_challenge() returns the page that solves the
 // challenge and stores the cookie.
 //
-// A client is identified by its IPv4 address or IPv6 /64, its User-Agent and
-// its Accept-Language. The challenge is an HMAC-SHA256 over that identity and
-// the current time slot. The client passes by finding a nonce whose SHA-256
-// with the challenge begins with POW_BITS zero bits, and stores
-// "<slot>.<nonce>" in the COOKIE_NAME cookie. A cookie is accepted for
-// its own slot and the one after it, so it lasts between WINDOW_SIZE and twice
-// WINDOW_SIZE.
+// A client is identified by its address, its User-Agent and its
+// Accept-Language; address_key() says how an address is reduced. The
+// challenge is an HMAC-SHA256 over that identity and the current time slot.
+// The client passes by finding a nonce whose SHA-256 with the challenge
+// begins with POW_BITS zero bits, and stores "<slot>.<nonce>" in the
+// COOKIE_NAME cookie. A cookie is accepted for its own slot and the one after
+// it, so it lasts between WINDOW_SIZE and twice WINDOW_SIZE.
 //
-// RESCREEN_RATE of document requests that already hold a valid cookie are
-// challenged again. Subresource and background requests are never
-// re-screened, because the challenge page is only a correct response to a
-// top-level navigation.
+// report() takes the solver path and rate the page sends after it solves, and
+// counts them.
 //
-// The module keeps no state. Rate limiting and blocking belong to limit_req.
+// The module keeps no state a request can reach. Rate limiting and blocking
+// belong to limit_req.
 //
 // Requirements:
 //
@@ -31,10 +30,8 @@ import cryptoModule from 'crypto';
 // - $remote_addr is the client address. Behind a CDN, set set_real_ip_from and
 //   real_ip_header, otherwise every visitor shares one identity.
 //
-// Limits:
-//
-// - POW_BITS is clamped to POW_BITS_MAX and to nothing else. Configuration
-//   problems are written to the error log on the first request, not at load.
+// Configuration problems are written to the error log on the first request,
+// not at load.
 
 
 // The solver assumes the challenge is exactly 64 bytes, which it is: an
@@ -99,18 +96,44 @@ function env_raw(name) {
     return value === undefined || value === "" ? null : value;
 }
 
-function env_number(name, fallback) {
+// A numeric setting from the environment, written in decimal digits. Number()
+// would also read whitespace as 0, hexadecimal, exponents and fractions, none
+// of which is a value an operator means, so anything else is NaN and fails
+// every range below.
+function env_integer(name) {
     const raw = env_raw(name);
     if (raw === null) {
-        return fallback;
+        return null;
     }
-    const value = Number(raw);
-    if (!isFinite(value)) {
-        fail_config("ANTIBOT_" + name + "=" + raw + " is not a number, using " +
-                    fallback);
-        return fallback;
+    return ["ANTIBOT_" + name + "=" + raw, /^[0-9]{1,15}$/.test(raw) ? Number(raw) : NaN];
+}
+
+function is_integer(v, min, max) {
+    return typeof v === "number" && Math.floor(v) === v && v >= min && v <= max;
+}
+
+// A setting is the first valid value among the environment, the constant in
+// this file and BUILTIN, in that order. Each candidate is [label, value], or
+// null where the environment holds none. broken(value) names the rule a value
+// breaks, or returns null for a valid one. Every candidate passed over is
+// reported with that rule and the value used instead, so a typo in either
+// place is never silent. BUILTIN values are valid, so a value is always found.
+function first_valid(candidates, broken) {
+    const rejected = [];
+    for (let i = 0; i < candidates.length; i++) {
+        if (candidates[i] === null) {
+            continue;
+        }
+        const why = broken(candidates[i][1]);
+        if (why === null) {
+            for (let j = 0; j < rejected.length; j++) {
+                fail_config(rejected[j] + ", using " + candidates[i][1]);
+            }
+            return candidates[i][1];
+        }
+        rejected.push(candidates[i][0] + " " + why);
     }
-    return value;
+    return null;
 }
 
 function env_string(name, fallback) {
@@ -125,34 +148,17 @@ const COOKIE_NAME = "__Host-antibot-ac";
 // It is HTML-escaped before being inserted.
 const SITE_NAME = "";
 
-
 const WINDOW_SIZE = 6 * 60 * 60;
 
-// A cookie is accepted for its own slot and the one after it, so it is
-// useful for at most twice WINDOW_SIZE. Past that the browser would send
-// bytes the module always refuses.
-const COOKIE_TTL = 2 * WINDOW_SIZE;
+// Cookie lifetime in the browser, in seconds. null means twice WINDOW_SIZE: a
+// cookie is accepted for its own slot and the one after it, so it is useful
+// for at most that long, and past it the browser would send bytes the module
+// always refuses.
+const COOKIE_TTL = null;
 
 // Difficulty in leading zero bits, at least 1. Each bit doubles the work.
 // There is no value that disables verification: check() always recomputes
-// the proof.
-//
-// Mean solve time with the SIMD solver on a desktop core:
-//
-//     bits | 1 worker | 2 workers | 4 workers
-//       22 |     0.5s |      0.2s |      0.2s
-//       24 |     1.9s |      1.0s |      0.6s
-//       26 |     7.5s |      3.9s |      2.4s
-//       28 |    30.0s |     15.7s |      9.8s
-//       30 |   120.0s |     63.0s |     39.0s
-//
-// One worker is the floor: a single-core client, or one where
-// navigator.hardwareConcurrency is unavailable. The table is node on one
-// desktop core; no browser and no phone has been measured, so a phone figure
-// cannot be given here.
-//
-// The wait is geometrically distributed. 5% of visitors wait more than 3x
-// the mean and 0.7% more than 5x. No visitor can be told how long to expect.
+// the proof. docs/configuration.md#difficulty gives the measured solve times.
 const POW_BITS = 22;
 
 const POW_BITS_MAX = 32;
@@ -161,30 +167,41 @@ const POW_BITS_MAX = 32;
 // A correct client exhausts it with probability e^-POW_EFFORT_FACTOR.
 const POW_EFFORT_FACTOR = 64;
 
-// Fraction of requests holding a valid cookie that are challenged again.
-// Applies to top-level navigations only.
-const RESCREEN_RATE = 0.02;
-
-// Level the per-challenge log line is written at: "info", "warn", "error" or
-// "off". A challenge is the module's ordinary answer, so it is written at
-// info, which nginx keeps out of an error log below that level. A deployment
-// that wants the line without turning the whole error log up to info raises
-// this; "off" writes nothing.
+// Level the per-challenge and per-report log lines are written at: "info",
+// "warn", "error" or "off". A challenge is the module's ordinary answer, so it
+// is written at info, which nginx keeps out of an error log below that level.
+// A deployment that wants the lines without turning the whole error log up to
+// info raises this; "off" writes nothing.
 const CHALLENGE_LOG_LEVEL = "info";
 
 const CHALLENGE_LOG_LEVELS = ["off", "info", "warn", "error"];
+
+// Where the page sends the solver path and rate after it solves. nginx serves
+// it from a location gated by check() that calls report().
+const REPORT_PATH = "/__antibot_report";
 
 // How many cookies sent under COOKIE_NAME are verified. A browser sends one:
 // the __Host- prefix forces Path=/, so a host cannot hold two. Trying every
 // one would let a request choose how many hashes the server performs.
 const MAX_COOKIE_CANDIDATES = 4;
 
+// What a setting falls back to when neither the environment nor the constant
+// above holds a valid value. Not for editing: change the constants above.
+const BUILTIN = {
+    COOKIE_NAME: "__Host-antibot-ac",
+    WINDOW_SIZE: 6 * 60 * 60,
+    POW_BITS: 22,
+    CHALLENGE_LOG_LEVEL: "info",
+    REPORT_PATH: "/__antibot_report"
+};
+
 const POW_BITS_EFFECTIVE = (function () {
-    let b = env_number("POW_BITS", POW_BITS);
-    if (typeof b !== "number" || !isFinite(b) || Math.floor(b) !== b || b < 1) {
-        fail_config("POW_BITS=" + b + " is not an integer of at least 1, using 16");
-        b = 16;
-    }
+    let b = first_valid(
+        [env_integer("POW_BITS"), ["POW_BITS=" + POW_BITS, POW_BITS],
+         ["", BUILTIN.POW_BITS]],
+        function (v) {
+            return is_integer(v, 1, Infinity) ? null : "is not an integer of at least 1";
+        });
     if (b > POW_BITS_MAX) {
         fail_config("POW_BITS=" + b + " exceeds POW_BITS_MAX=" + POW_BITS_MAX +
                     ", clamped to " + POW_BITS_MAX);
@@ -195,27 +212,29 @@ const POW_BITS_EFFECTIVE = (function () {
 
 // A slot shorter than a minute would expire while a client is still solving.
 // The ceiling keeps a cookie from outliving a secret rotation by months.
-const WINDOW_SIZE_EFFECTIVE = (function () {
-    let v = env_number("WINDOW_SIZE", WINDOW_SIZE);
-    if (typeof v !== "number" || !isFinite(v) || Math.floor(v) !== v ||
-        v < 60 || v > 30 * 24 * 60 * 60) {
-        fail_config("WINDOW_SIZE=" + v + " is not an integer between 60 and " +
-                    (30 * 24 * 60 * 60) + " seconds, using " + WINDOW_SIZE);
-        v = WINDOW_SIZE;
-    }
-    return v;
-})();
+const WINDOW_SIZE_MAX = 30 * 24 * 60 * 60;
+
+const WINDOW_SIZE_EFFECTIVE = first_valid(
+    [env_integer("WINDOW_SIZE"), ["WINDOW_SIZE=" + WINDOW_SIZE, WINDOW_SIZE],
+     ["", BUILTIN.WINDOW_SIZE]],
+    function (v) {
+        return is_integer(v, 60, WINDOW_SIZE_MAX)
+            ? null : "is not an integer between 60 and " + WINDOW_SIZE_MAX + " seconds";
+    });
 
 // The __Host- prefix forces Path=/ and forbids Domain, which is what keeps a
 // host from holding two cookies under this name. A name without it still
 // works and gives up that guarantee, so it is reported and kept.
 const COOKIE_NAME_EFFECTIVE = (function () {
-    let v = env_string("COOKIE_NAME", COOKIE_NAME);
-    if (!/^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/.test(v)) {
-        fail_config("COOKIE_NAME=" + v + " is not a cookie name, using " +
-                    COOKIE_NAME);
-        v = COOKIE_NAME;
-    } else if (v.indexOf("__Host-") !== 0) {
+    const raw = env_raw("COOKIE_NAME");
+    const v = first_valid(
+        [raw === null ? null : ["ANTIBOT_COOKIE_NAME=" + raw, raw],
+         ["COOKIE_NAME=" + COOKIE_NAME, COOKIE_NAME], ["", BUILTIN.COOKIE_NAME]],
+        function (name) {
+            return typeof name === "string" && /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/.test(name)
+                ? null : "is not a cookie name";
+        });
+    if (v.indexOf("__Host-") !== 0) {
         fail_config("COOKIE_NAME=" + v + " has no __Host- prefix, so a host " +
                     "can hold more than one under this name");
     }
@@ -224,41 +243,47 @@ const COOKIE_NAME_EFFECTIVE = (function () {
 
 const SITE_NAME_EFFECTIVE = env_string("SITE_NAME", SITE_NAME);
 
-// A rate of 1 challenges every navigation that holds a valid cookie, so a
-// visitor solves, reloads and is challenged again without end. The range
-// excludes it.
-const RESCREEN_RATE_EFFECTIVE = (function () {
-    let v = env_number("RESCREEN_RATE", RESCREEN_RATE);
-    if (typeof v !== "number" || !isFinite(v) || v < 0 || v >= 1) {
-        fail_config("RESCREEN_RATE=" + v + " is not a number in [0, 1), using 0.02");
-        v = 0.02;
-    }
-    return v;
-})();
-
-// A cookie is accepted for its own slot and the one after it. A lifetime below
-// that has the browser drop it while the module would still take it, which
-// challenges the visitor again for no gain.
+// A lifetime below twice the window has the browser drop the cookie while the
+// module would still take it, which challenges the visitor again for no gain.
+// A Max-Age that is not a run of digits is ignored by the browser, so a value
+// must be a whole number of seconds.
 const COOKIE_TTL_EFFECTIVE = (function () {
     const floor = 2 * WINDOW_SIZE_EFFECTIVE;
-    let v = env_number("COOKIE_TTL", COOKIE_TTL);
-    if (typeof v !== "number" || !isFinite(v) || Math.floor(v) !== v || v < floor) {
-        fail_config("COOKIE_TTL=" + v + " is below twice WINDOW_SIZE=" + floor +
-                    ", using " + floor);
-        v = floor;
-    }
-    return v;
+    return first_valid(
+        [env_integer("COOKIE_TTL"),
+         COOKIE_TTL === null ? null : ["COOKIE_TTL=" + COOKIE_TTL, COOKIE_TTL],
+         ["", floor]],
+        function (v) {
+            if (!is_integer(v, 0, 999999999999999)) {
+                return "is not a whole number of seconds";
+            }
+            return v < floor ? "is below twice WINDOW_SIZE=" + floor : null;
+        });
 })();
 
 const CHALLENGE_LOG_LEVEL_EFFECTIVE = (function () {
-    const v = env_string("CHALLENGE_LOG_LEVEL", CHALLENGE_LOG_LEVEL);
-    if (CHALLENGE_LOG_LEVELS.indexOf(v) === -1) {
-        fail_config("CHALLENGE_LOG_LEVEL=" + v + " is not one of " +
-                    CHALLENGE_LOG_LEVELS.join(", ") + ", using " +
-                    CHALLENGE_LOG_LEVEL);
-        return CHALLENGE_LOG_LEVEL;
-    }
-    return v;
+    const raw = env_raw("CHALLENGE_LOG_LEVEL");
+    return first_valid(
+        [raw === null ? null : ["ANTIBOT_CHALLENGE_LOG_LEVEL=" + raw, raw],
+         ["CHALLENGE_LOG_LEVEL=" + CHALLENGE_LOG_LEVEL, CHALLENGE_LOG_LEVEL],
+         ["", BUILTIN.CHALLENGE_LOG_LEVEL]],
+        function (v) {
+            return CHALLENGE_LOG_LEVELS.indexOf(v) !== -1
+                ? null : "is not one of " + CHALLENGE_LOG_LEVELS.join(", ");
+        });
+})();
+
+// The page inserts the path into a URL it requests from the same origin, so
+// it is an absolute path of URL-safe characters and nothing else.
+const REPORT_PATH_EFFECTIVE = (function () {
+    const raw = env_raw("REPORT_PATH");
+    return first_valid(
+        [raw === null ? null : ["ANTIBOT_REPORT_PATH=" + raw, raw],
+         ["REPORT_PATH=" + REPORT_PATH, REPORT_PATH], ["", BUILTIN.REPORT_PATH]],
+        function (v) {
+            return typeof v === "string" && /^\/[A-Za-z0-9._~\/-]*$/.test(v)
+                ? null : "is not an absolute path of letters, digits and ._~/-";
+        });
 })();
 
 const POW_EXPECTED_WORK = Math.pow(2, POW_BITS_EFFECTIVE);
@@ -274,8 +299,8 @@ const POW_MAX_ITERATIONS = POW_EXPECTED_WORK * POW_EFFORT_FACTOR;
 // Without that zone the module gates exactly as it does with it, and status()
 // says the zone is missing rather than reporting zeros.
 const STATS_ZONE = "antibot";
-const STATS_KEYS = ["challenges", "accepted", "rejected", "rescreened",
-                    "misconfigured"];
+const STATS_KEYS = ["challenges", "accepted", "rejected", "misconfigured",
+                    "solved_wasm", "solved_js", "solved_slow"];
 
 function stats_dict() {
     try {
@@ -353,6 +378,18 @@ function expand_ipv6(address) {
 // an IPv6 address as its /64, and an IPv4-mapped address as the IPv4 it
 // carries. An address that does not parse is kept whole.
 //
+// Three IPv6 ranges hold one IPv4 client per address rather than one host per
+// /64, so the /64 would put many clients in one identity:
+//
+// - 64:ff9b::/96, the well-known prefix of IPv4/IPv6 translation (RFC 6052),
+//   carries the client's IPv4 address in its last 32 bits and is reduced to
+//   it, as an IPv4-mapped address is;
+// - 64:ff9b:1::/48, the local-use translation prefix (RFC 8215), embeds the
+//   IPv4 address at a position the operator's prefix length decides, so it is
+//   kept whole;
+// - 2001::/32, Teredo (RFC 4380), carries its server's IPv4 address in bits 32
+//   to 63, so every client of one server shares a /64, and it is kept whole.
+//
 // Two different addresses must never produce the same key. Folding an
 // unparsed address to a constant would put every such client in one bucket,
 // where one solved cookie serves all of them.
@@ -378,6 +415,20 @@ function address_key(address) {
     const groups = expand_ipv6(address);
     if (!groups) {
         return address;
+    }
+    if (groups[0] === "64" && groups[1] === "ff9b") {
+        if (groups[2] === "0" && groups[3] === "0" && groups[4] === "0" &&
+            groups[5] === "0") {
+            const high = parseInt(groups[6], 16);
+            const low = parseInt(groups[7], 16);
+            return (high >> 8) + "." + (high & 255) + "." + (low >> 8) + "." + (low & 255);
+        }
+        if (groups[2] === "1") {
+            return groups.join(":");
+        }
+    }
+    if (groups[0] === "2001" && groups[1] === "0") {
+        return groups.join(":");
     }
     return groups.slice(0, 4).join(":") + "::/64";
 }
@@ -522,20 +573,12 @@ function parse_cookie_value(value) {
     if (!/^(0|[1-9][0-9]{0,14})$/.test(nonce)) {
         return null;
     }
-    if (Number(nonce) > POW_MAX_ITERATIONS) {
+    // The page's workers scan the nonces below the cap, so one at or above it
+    // is a nonce no page produced.
+    if (Number(nonce) >= POW_MAX_ITERATIONS) {
         return null;
     }
     return { slot: Number(slot), nonce: nonce };
-}
-
-// A re-screen answers with the challenge page, which is only a correct
-// response to a top-level navigation: handing it to a fetch, an image or a
-// background request corrupts whatever asked. Sec-Fetch-Dest states what the
-// client will do with the response. Clients that do not send it are treated
-// as navigating.
-function is_document_request(r) {
-    const dest = r.headersIn["Sec-Fetch-Dest"];
-    return !dest || dest === "document";
 }
 
 function check(r) {
@@ -582,11 +625,6 @@ function check(r) {
         }
         if (!pow_valid(challenge, parsed.nonce)) {
             continue;
-        }
-        if (is_document_request(r) && Math.random() < RESCREEN_RATE_EFFECTIVE) {
-            count("rescreened");
-            r.return(401, "");
-            return;
         }
         count("accepted");
         r.return(204, "");
@@ -674,7 +712,7 @@ const PAGE_TOKENS = [
     "__ANTIBOT_HEADING__", "__ANTIBOT_CHALLENGE__", "__ANTIBOT_BITS__",
     "__ANTIBOT_SLOT__", "__ANTIBOT_CAP__", "__ANTIBOT_EXPECTED__",
     "__ANTIBOT_COOKIE_NAME__", "__ANTIBOT_COOKIE_TTL__",
-    "__ANTIBOT_WASM_B64__", "__ANTIBOT_WORKER_SRC__"
+    "__ANTIBOT_WASM_B64__", "__ANTIBOT_WORKER_SRC__", "__ANTIBOT_REPORT_PATH__"
 ];
 
 (function () {
@@ -699,7 +737,8 @@ function build_challenge(r, slot) {
         __ANTIBOT_COOKIE_NAME__: COOKIE_NAME_EFFECTIVE,
         __ANTIBOT_COOKIE_TTL__: COOKIE_TTL_EFFECTIVE,
         __ANTIBOT_WASM_B64__: POW_WASM_SIMD_B64,
-        __ANTIBOT_WORKER_SRC__: WORKER_SOURCE_ESCAPED
+        __ANTIBOT_WORKER_SRC__: WORKER_SOURCE_ESCAPED,
+        __ANTIBOT_REPORT_PATH__: REPORT_PATH_EFFECTIVE
     };
 
     // Odd entries are the tokens the split captured. A token with no value
@@ -733,8 +772,10 @@ function serve_challenge(r) {
     // One line arrives for every request that has no cookie yet, so the level
     // is a setting: info by default, raised where the line has to show in an
     // error log that is not turned up to info.
+    // $request_uri is what the client asked for. After error_page, r.uri is
+    // the internal location the request was redirected to.
     log_challenge(r, "antibot: challenge served to " + log_field(r.remoteAddress) +
-                  " uri=" + log_field(r.uri));
+                  " uri=" + log_field(r.variables.request_uri));
 
     r.headersOut["Content-Type"] = "text/html; charset=utf-8";
     r.headersOut["Cache-Control"] = "no-store, no-cache, must-revalidate";
@@ -742,6 +783,32 @@ function serve_challenge(r) {
     r.headersOut["X-Content-Type-Options"] = "nosniff";
     count("challenges");
     r.return(200, html);
+}
+
+// A solve counts as slow when the rate reported puts the mean solve at the
+// current difficulty above this many seconds.
+const SLOW_SOLVE_SECONDS = 10;
+
+// The page sends the solver that won, "wasm" or "js", and its rate in hashes
+// per second, once it has written the cookie. REPORT_PATH is served from a
+// location gated by check(), so only a client holding a valid cookie reaches
+// this. A holder can send it again, so the counts are what visitors report.
+function report(r) {
+    report_config(r);
+    const solver = r.args.solver;
+    const rate = r.args.rate;
+    if ((solver !== "wasm" && solver !== "js") ||
+        typeof rate !== "string" || !/^[0-9]{1,12}$/.test(rate)) {
+        r.return(400, "");
+        return;
+    }
+    count("solved_" + solver);
+    if (Number(rate) * SLOW_SOLVE_SECONDS < POW_EXPECTED_WORK) {
+        count("solved_slow");
+    }
+    log_challenge(r, "antibot: solved by " + log_field(r.remoteAddress) +
+                  " solver=" + solver + " rate=" + rate);
+    r.return(204, "");
 }
 
 // The counters, as text. Restrict the location that serves it: the numbers
@@ -754,7 +821,8 @@ function status(r) {
 
     const dict = stats_dict();
     let body = "version " + ANTIBOT_VERSION + "\n" +
-               "bits " + POW_BITS_EFFECTIVE + "\n";
+               "bits " + POW_BITS_EFFECTIVE + "\n" +
+               "window " + WINDOW_SIZE_EFFECTIVE + "\n";
     if (dict === null) {
         r.return(200, body + "zone missing\n");
         return;
@@ -772,4 +840,4 @@ function status(r) {
     r.return(200, body);
 }
 
-export default { check, serve_challenge, status };
+export default { check, serve_challenge, report, status };

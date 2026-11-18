@@ -7,7 +7,8 @@
  * createObjectURL hands back a token for it, and Worker runs that source in a
  * real thread through the same shim the other tests use.
  *
- * Resolves with the cookies the page set, once it calls location.reload().
+ * Resolves with the cookies the page set and the reports it sent through
+ * navigator.sendBeacon, once it calls location.reload().
  */
 
 import { Worker as NodeWorker } from 'node:worker_threads';
@@ -35,8 +36,10 @@ export function runChallengePage(html, options = {}) {
         const workers = [];
         const cookies = [];
         const violations = [];
+        const beacons = [];
         const settle = (extra) => finish(() => resolve({
             cookies: cookies.slice(),
+            beacons: beacons.slice(),
             progress: elements.pct.textContent,
             violations: violations.slice(),
             workers: workers.length,
@@ -120,7 +123,10 @@ export function runChallengePage(html, options = {}) {
             }
         };
         const locationStub = { reload() { settle({ failed: false }); } };
-        const navigatorStub = { hardwareConcurrency: cores };
+        const navigatorStub = {
+            hardwareConcurrency: cores,
+            sendBeacon(url) { beacons.push(url); return true; }
+        };
         const windowStub = {
             Worker: WorkerStub, Blob: BlobStub, URL: URLStub,
             WebAssembly: withWebAssembly ? WebAssembly : undefined

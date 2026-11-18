@@ -8,11 +8,13 @@
   [`ngx_http_auth_request_module`](https://nginx.org/en/docs/http/ngx_http_auth_request_module.html).
   CI runs the module under njs 0.8.2; the newest library method it uses is
   `String.prototype.startsWith`.
-- `ANTIBOT_SECRET` exported to the nginx workers with `env ANTIBOT_SECRET;`,
-  at least 32 characters. It is read when the module loads, so changing it
-  takes effect on the next nginx reload and invalidates every cookie in
+- `ANTIBOT_SECRET` in the environment nginx starts in, exported to the
+  workers with `env ANTIBOT_SECRET;`, at least 32 characters. A reload keeps
+  the secret the master started with, so rotating it, after a leak or
+  otherwise, takes a stop and a start, and invalidates every cookie in
   circulation. Every other setting is optional and read the same way;
-  [configuration](configuration.md) lists them.
+  [configuration](configuration.md) lists them and says why a reload and the
+  `env NAME=value;` form do not change them.
 - Every host serving the site needs the same `ANTIBOT_SECRET`,
   `ANTIBOT_WINDOW_SIZE`, `ANTIBOT_COOKIE_NAME` and `ANTIBOT_POW_BITS`. A
   cookie is solved against one host and presented to the next, and those four
@@ -26,12 +28,14 @@
   identity and a single solved cookie serves all of them.
 - A `Content-Security-Policy` reaching the challenge location must allow
   `'unsafe-inline'`, `'unsafe-eval'` and `'wasm-unsafe-eval'` in `script-src`,
-  `'unsafe-inline'` in `style-src`, and `blob:` in `worker-src`. The page
-  carries its script and style inline, builds the JS solver with
-  `new Function`, compiles the wasm one, and runs both in a blob worker. Under
-  a stricter policy every solver fails and the visitor reads "Verification
-  failed". The example carries the header for that location; a site-wide
-  policy must be overridden there, not relaxed everywhere.
+  `'unsafe-inline'` in `style-src`, `blob:` in `worker-src`, and `'self'` in
+  `connect-src`. The page carries its script and style inline, builds the JS
+  solver with `new Function`, compiles the wasm one, runs both in a blob
+  worker, and sends its solve report to the site's own origin. Under a
+  stricter policy every solver fails and the visitor reads "Verification
+  failed", except that without `connect-src 'self'` the page solves and its
+  report is dropped. The example carries the header for that location; a
+  site-wide policy must be overridden there, not relaxed everywhere.
 - Browsers must reach the site over HTTPS. The cookie carries the
   [`__Host-` prefix](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#cookie_prefixes)
   and the `Secure` attribute, which a browser stores only on a secure origin.
@@ -55,7 +59,7 @@ downloaded copy against each. The release attestation binds the file to the
 release:
 
 ```sh
-gh release verify-asset v0.1.0 antibot.js --repo ppigazzini/nginx-njs-antibot
+gh release verify-asset <tag> antibot.js --repo ppigazzini/nginx-njs-antibot
 ```
 
 The build provenance attestation binds the file's SHA-256 to the commit and
@@ -72,8 +76,9 @@ gh attestation verify antibot.js \
 The module must be reachable through `js_path` and imported with `js_import`.
 `check` is served from an internal location used as the `auth_request` target,
 and `serve_challenge` from the internal location that `error_page 401` points
-at. Routes for non-browser clients must be matched before the gated
-catch-all.
+at. `report` is served at `REPORT_PATH` from a location gated by the same
+`auth_request`; [configuration](configuration.md#the-solve-report) gives it.
+Routes for non-browser clients must be matched before the gated catch-all.
 
 A request without a valid cookie is answered with the challenge page, and its
 body is discarded before the backend sees it. Gate the pages a visitor

@@ -7,7 +7,14 @@
 ./build.sh --no-test  # compile and assemble only
 ./build.sh --strict   # treat compiler warnings as errors
 npm test              # the three suites, after a build
+CLANG=clang-18 CLANG_MAJOR=18 ./build.sh   # the compiler CI and releases use
 ```
+
+`CLANG` names the compiler, `clang` by default. With `CLANG_MAJOR` set the
+build fails unless the compiler reports that major. The solver's rate follows
+the compiler: one source gives a different `solve()` under each clang major.
+CI and releases build with `clang-18` 1:18.1.3-1ubuntu1 from the Ubuntu 24.04
+archive, which rebuilds the v0.0.2 release wasm byte for byte from its source.
 
 No binary is committed. `build.sh` assembles `dist/antibot.js` from five
 files, and modifies none of them:
@@ -61,19 +68,23 @@ node test/module.test.mjs dist/antibot.js
 
 `test/solver.test.mjs` checks both solvers against node's SHA-256: full digest
 vectors, index agreement with brute force, the digit-carry boundaries at
-powers of ten where the block is rebuilt, and throughput. It reads the wasm
+powers of ten where the block is rebuilt, and throughput. It fails when the
+SIMD solver runs below 1.4 times the JS solver in the same process; the
+machine's speed cancels in that ratio. It reads the wasm
 from the directory holding the module it was given. The pure-JS solver is
 lifted out of the built module and evaluated, so what is checked is the source
 that ships.
 
 `test/module.test.mjs` solves through real worker threads on both solver
 paths and feeds each cookie back to `check()`. It also covers the rejection
-cases, the slot boundary from both sides, settings read from the environment,
-the constants that are validated at load, the identity invariant in both
-directions, the cookie-candidate bound, the difficulty the page ships against
-the one the server enforces, the level the challenge line is written at, the
-escaping of `SITE_NAME`, the page template's tokens, and the cost of the
-inputs a request controls.
+cases, the slot boundary from both sides, the iteration cap from both sides,
+settings read from the environment and from the source with every malformed
+number it refuses, the identity invariant in both directions including
+translated addresses, the cookie-candidate bound, the difficulty the page
+ships against the one the server enforces, the level the challenge line is
+written at, the URI it names, the escaping of `SITE_NAME`, the page template's
+tokens, the solve report the page sends and `report()` takes, the counters,
+and the growth in cost with every input a request controls.
 
 `test/mutants.mjs` grades the suites rather than the module. It holds a fixed
 list of defects, each naming the suite that must notice it, writes each into
@@ -85,10 +96,12 @@ every run. Two defects are left out because the nginx lane is what catches
 them: dropping the `nosniff` header and dropping `no-store`.
 
 `test/module-fuzz.mjs` throws random and deliberately awkward cookies,
-addresses and headers at `check()` and `serve_challenge()`. It asserts that
-neither throws, that the status is always 204, 401 or 500, and that a 204 is
-only ever returned for a nonce whose digest meets the difficulty, verified
-against the challenge the module issues for the same identity.
+addresses, headers and report arguments at `check()`, `serve_challenge()` and
+`report()`. It asserts that none throws, that `check()` answers 204, 401 or
+500 and `report()` 204 or 400, and that a 204 from `check()` is only ever
+returned for a nonce whose digest meets the difficulty, verified against the
+challenge the module issues for the same identity. It reads the window from
+`status()`, so it runs under any `ANTIBOT_WINDOW_SIZE`.
 
 Reaching that last assertion needs a solved cookie, which costs 2^22 tries at
 the shipped difficulty. The suite runs three passes: the built module at its
@@ -105,15 +118,12 @@ thing most likely to be wrong. A mutation moves a solved cookie onto the
 earlier slot often enough that checking only the current one reports the gate
 as broken.
 
-Cookie-acceptance assertions use `Sec-Fetch-Dest: empty`. A navigation is
-re-screened at `RESCREEN_RATE` and returns 401 for a valid cookie, so
-asserting 204 on one would be flaky rather than strict.
-
 ## Under nginx
 
 ```sh
 ./test/nginx/check.sh                  # dist/antibot.js on port 8443
 ./test/nginx/check.sh dist/antibot.js 8443
+NGINX_MODULES=/path/to/modules ./test/nginx/check.sh   # njs outside the system paths
 ```
 
 Serves `examples/nginx.conf.example` under a real nginx and drives the module
@@ -121,8 +131,29 @@ through njs, which is the only place it runs outside node. The config,
 certificate and module go under a temporary prefix that is removed on exit, so
 it needs no privilege and touches nothing outside it. It asserts the gate, the
 status and headers, the documented policy, a setting arriving from the
-environment, the error log, the accept path, cookie handling as nginx merges
-it, and the routes.
+environment, the error log and the URI it names, the accept path, the solve
+report, cookie handling as nginx merges it, the routes, the counters, and
+what a reload changes: the secret, the counters, and an `env NAME=value;`
+line.
+
+## Measurements
+
+Every rate and cost in `docs/` comes from one of these, pinned with
+`taskset` to one core, or to one core and its hyperthread for a browser:
+
+```sh
+taskset -c 2 node test/bench/rate.mjs                 # both solvers under node
+taskset -c 2 node test/bench/rate.mjs a=x.wasm b=y.wasm
+taskset -c 2 node test/bench/cost.mjs                 # server cost per request
+taskset -c 2,6 node test/browser/rate.mjs <chromium>  # both solvers in a worker
+node test/browser/page.mjs <chromium> --bits 18 --js-flags=--jitless
+```
+
+`test/browser/` drives a headless Chromium over the DevTools protocol through
+node's own WebSocket and HTTP, with no dependency. `page.mjs` serves the page a
+built module emits under the policy the example sets, solves it in the
+browser, and exits non-zero unless the cookie is accepted and the report is
+taken.
 
 ## Native checks
 
@@ -160,21 +191,20 @@ release, so the commit it names stays reachable. The guards are functions in
 `test/release/guards.sh`, and `test/release/check.sh` runs them over a table
 of tags on every push, because they otherwise run once per release.
 
-The `example` job serves `examples/nginx.conf.example` under a real nginx and
-asserts that a gated route returns the challenge page with status 200, that
-the page carries both solvers and the exact wasm that was built, that a
-settings change reaches the page through the environment, that the documented
-`Content-Security-Policy` is served and the page still solves under it, that a
-solved cookie reaches the backend and does not travel to another identity, and
-that a non-browser route reaches the backend. It is the only place the module
-runs in njs, not node.
+The `example` job runs `test/nginx/check.sh`, the [nginx lane](#under-nginx).
+It is the only place the module runs in njs, not node. It then runs
+`test/browser/page.mjs` in the runner's Chrome, once on the wasm solver and
+once with the JIT off, so the page solves, sends its report and is accepted
+under the documented policy in a real browser.
 
 The `mutants` job runs `test/mutants.mjs` against the artifact the `build` job
 uploaded. It is separate because it runs a suite per mutation.
 
-The `build` job compiles the solver, assembles the module, repeats the build
-with warnings as errors, runs the three suites and `npm test`, and uploads the
-artifact the other jobs take. The `sanitize` job runs `test/native/check.sh`.
+The `build` job runs on `ubuntu-24.04` with `clang-18` and `CLANG_MAJOR=18`.
+It compiles the solver, assembles the module, repeats the build with warnings
+as errors, runs the three suites and `npm test`, records the SHA-256 of what it
+built, and uploads the artifact the other jobs take. The `sanitize` job runs
+`test/native/check.sh`.
 
 The `workflows` job runs [zizmor](https://docs.zizmor.sh/audits/) over the
 workflows and `.github/dependabot.yml` and fails on any finding. It then runs
@@ -195,8 +225,6 @@ job installs, and Dependabot does not update it. The job writes a warning when
 a newer release has been out for the cooldown `dependabot.yml` sets; raise the
 version by hand and rerun `gh actions-lock`.
 
-The wasm is not byte-reproducible across clang versions, so CI records the
-compiler version and the SHA-256 of what it built alongside the artifact.
 
 ## Releases
 
@@ -204,10 +232,9 @@ Set `version` in `package.json` to the version being released. `build.sh`
 stamps it into `ANTIBOT_VERSION`, and the workflow refuses a tag that does not
 match it.
 
-Run the `release` workflow from the Actions tab with the tag, such as
-`v0.1.0`. `package.json` holds `0.1.0`: the version has no prefix and the tag
-for it does.
-It builds, tests and runs the module under nginx, then attaches `antibot.js`
+Run the `release` workflow from the Actions tab with the tag: for version
+`0.1.0` in `package.json` the tag is `v0.1.0`. The version has no prefix and
+the tag for it does. It builds, tests and runs the module under nginx, then attaches `antibot.js`
 and nothing else: the solver is embedded in it. The SHA-256 is in the notes.
 
 Before it publishes, the `publish` job signs a

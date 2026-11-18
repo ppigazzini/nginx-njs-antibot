@@ -18,6 +18,15 @@
 #   ./build.sh --no-test    compile and assemble only
 #   ./build.sh --strict     treat warnings as errors
 #
+# Environment:
+#   CLANG        the compiler, default clang
+#   CLANG_MAJOR  if set, the build fails unless CLANG reports this major
+#
+# The solver's rate follows the compiler: one source gives a different
+# solve() under each clang major. CI and releases build with clang-18 from
+# the Ubuntu 24.04 archive and set CLANG_MAJOR, so a runner image change
+# cannot change the shipped binary.
+#
 # Warnings are not errors by default. A compiler newer or older than the one
 # a change was written against can warn about untouched code, and that must
 # not stop the deliverable from building. CI runs --strict as its own step so
@@ -67,9 +76,14 @@ done
 
 die() { printf '%s: %s\n' "${0##*/}" "$*" >&2; exit 1; }
 
-command -v clang   >/dev/null || die "clang not found"
-command -v wasm-ld >/dev/null || die "wasm-ld not found (install lld)"
-clang --print-targets 2>/dev/null | grep -q wasm32 || die "clang has no wasm32 target"
+readonly CLANG=${CLANG:-clang}
+command -v "$CLANG" >/dev/null || die "$CLANG not found"
+"$CLANG" --print-targets 2>/dev/null | grep -q wasm32 || die "$CLANG has no wasm32 target"
+clang_version=$("$CLANG" --version | head -1)
+if [ -n "${CLANG_MAJOR:-}" ]; then
+    printf '%s\n' "$clang_version" | grep -Eq "clang version ${CLANG_MAJOR}\." \
+        || die "CLANG_MAJOR=$CLANG_MAJOR, and $CLANG is: $clang_version"
+fi
 [ -f "$SOURCE" ]     || die "$SOURCE not found"
 [ -f "$MODULE_SRC" ] || die "$MODULE_SRC not found"
 grep -q "^const $PAYLOAD = \"\";" "$MODULE_SRC" \
@@ -82,10 +96,10 @@ done
 
 mkdir -p "$DIST"
 
-printf 'compiling %s\n' "$SOURCE"
+printf 'compiling %s with %s\n' "$SOURCE" "$clang_version"
 werror=()
 [ "$strict" -eq 1 ] && werror=(-Werror)
-clang "${CFLAGS[@]}" "${WARNINGS[@]}" "${werror[@]}" "${LDFLAGS[@]}" -o "$WASM" "$SOURCE"
+"$CLANG" "${CFLAGS[@]}" "${WARNINGS[@]}" "${werror[@]}" "${LDFLAGS[@]}" -o "$WASM" "$SOURCE"
 b64=$DIST/.wasm.b64
 # base64 -w0 is GNU only; fold the newlines instead.
 base64 < "$WASM" | tr -d '\n' > "$b64"
