@@ -1,7 +1,8 @@
 /*
  * Reads a challenge page on stdin, solves it, and prints the cookie as
- * name=value. Used by the nginx lane to exercise the accept path, which
- * otherwise never runs under njs.
+ * name=value on the first line and the report URL the page sent on the
+ * second. Used by the nginx lane to exercise the accept path and report(),
+ * which otherwise never run under njs.
  */
 
 import { runChallengePage } from './page-runner.mjs';
@@ -21,8 +22,9 @@ if (!/<script>\n[\s\S]*?<\/script>/.test(html)) {
 }
 
 const out = await runChallengePage(html, { cores: 4, timeoutMs: 120000 });
-if (out.failed || out.cookies.length !== 1) {
-    console.error('the page did not produce a cookie');
+if (out.failed || out.cookies.length !== 1 || out.beacons.length !== 1) {
+    console.error('the page produced ' + out.cookies.length + ' cookies and ' +
+                  out.beacons.length + ' reports, expected one of each');
     process.exit(1);
 }
-process.stdout.write(out.cookies[0].split(';')[0]);
+process.stdout.write(out.cookies[0].split(';')[0] + '\n' + out.beacons[0] + '\n');

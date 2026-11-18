@@ -74,7 +74,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
 # Searched rather than piped: find returns non-zero for a directory that is
 # not there, and pipefail would turn that into a silent exit.
 module_so=""
-for dir in /usr/lib/nginx/modules /usr/lib64/nginx/modules \
+for dir in ${NGINX_MODULES:-} /usr/lib/nginx/modules /usr/lib64/nginx/modules \
            /usr/local/nginx/modules /usr/share/nginx/modules; do
     if [ -f "$dir/ngx_http_js_module.so" ]; then
         module_so=$dir/ngx_http_js_module.so
@@ -83,6 +83,8 @@ for dir in /usr/lib/nginx/modules /usr/lib64/nginx/modules \
 done
 [ -n "$module_so" ] || fail "ngx_http_js_module.so not found"
 echo "  module: $module_so"
+nginx -v 2>&1 | sed 's/^/  /'
+dpkg-query -W libnginx-mod-http-js 2>/dev/null | sed 's/^/  /' || true
 
 sed -e "s|^load_module .*|load_module $module_so;|" \
     -e "/^load_module/a error_log $TMP/logs/error.log info;" \
@@ -148,7 +150,8 @@ ok "nosniff and no-store present"
 
 csp=$(echo "$headers" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ss]ecurity-[Pp]olicy: //p')
 [ -n "$csp" ] || { echo "$headers"; fail "no policy on the challenge response"; }
-for token in "'unsafe-inline'" "'unsafe-eval'" "'wasm-unsafe-eval'" "worker-src blob:"; do
+for token in "'unsafe-inline'" "'unsafe-eval'" "'wasm-unsafe-eval'" "worker-src blob:" \
+             "connect-src 'self'"; do
     case $csp in
         *"$token"*) ;;
         *) fail "the policy lacks $token: $csp" ;;
@@ -195,36 +198,58 @@ if grep -q '^antibot:' "$TMP/logs/error.log"; then
     grep -n '^antibot:' "$TMP/logs/error.log"
     fail "a line in the error log begins with antibot:, so one was forged"
 fi
-# serve_challenge runs after error_page 401, so r.uri is the internal location
-# and carries nothing the client sent.
+# The line names $request_uri, what the client sent, and not the internal
+# location error_page redirected the request to.
 grep -o 'antibot: challenge served to .*' "$TMP/logs/error.log" | tail -1 || true
-ok "$count challenge lines, none forged"
+grep -qF 'uri=/a%0Aantibot:%20forged' "$TMP/logs/error.log" \
+    || fail "the challenge line does not name the URI the client requested"
+if grep -q 'uri=/__antibot_challenge' "$TMP/logs/error.log"; then
+    fail "the challenge line names the internal location"
+fi
+ok "$count challenge lines, none forged, each naming the requested URI"
 
 echo "== the accept path =="
 
-# Everything above drives check() down its reject branch. Sec-Fetch-Dest keeps
-# these out of the re-screen sample, which would answer with the challenge
-# page 2% of the time.
+# Everything above drives check() down its reject branch.
 ua='antibot-ci/1.0'
-curl -ks -A "$ua" -H 'Sec-Fetch-Dest: empty' "$URL/" > "$TMP/page.html"
-cookie=$(node test/solve-page.mjs < "$TMP/page.html")
+curl -ks -A "$ua" "$URL/" > "$TMP/page.html"
+node test/solve-page.mjs < "$TMP/page.html" > "$TMP/solved"
+cookie=$(sed -n 1p "$TMP/solved")
+report=$(sed -n 2p "$TMP/solved")
 echo "  solved $cookie"
-body=$(curl -ks -A "$ua" -H 'Sec-Fetch-Dest: empty' -H "Cookie: $cookie" "$URL/")
+body=$(curl -ks -A "$ua" -H "Cookie: $cookie" "$URL/")
 [ "$body" = "backend-root" ] || { echo "$body" | head -20; fail "the solved cookie was not accepted"; }
 ok "a solved cookie reaches the backend"
 
-body=$(curl -ks -A 'a-different-agent/1.0' -H 'Sec-Fetch-Dest: empty' \
-         -H "Cookie: $cookie" "$URL/")
+body=$(curl -ks -A 'a-different-agent/1.0' -H "Cookie: $cookie" "$URL/")
 echo "$body" | grep -q 'Verifying you are not a bot' \
     || { echo "$body" | head -20; fail "the cookie was accepted for another identity"; }
 ok "the cookie does not travel to another identity"
 
+echo "== the solve report =="
+
+# The page sends this with the cookie it has just stored. The location is
+# gated, so a client without the cookie is refused before report() runs.
+case $report in
+    /__antibot_report\?solver=wasm\&rate=[1-9]*) ;;
+    *) fail "the page reported '$report'" ;;
+esac
+code=$(curl -ks -o /dev/null -w '%{http_code}' -X POST -A "$ua" -H "Cookie: $cookie" "$URL$report")
+[ "$code" = "204" ] || fail "a report with the solved cookie answered $code"
+code=$(curl -ks -o /dev/null -w '%{http_code}' -X POST -A "$ua" "$URL$report")
+[ "$code" = "401" ] || fail "a report without a cookie answered $code"
+code=$(curl -ks -o /dev/null -w '%{http_code}' -X POST -A "$ua" -H "Cookie: $cookie" \
+         "$URL/__antibot_report?solver=gpu&rate=1")
+[ "$code" = "400" ] || fail "a malformed report answered $code"
+grep -q 'antibot: solved by .* solver=wasm rate=' "$TMP/logs/error.log" \
+    || fail "the report was not logged"
+ok "$report taken with the cookie, refused without it, malformed refused"
 echo "== cookie handling under njs =="
 
 # Duplicates, an empty value and a malformed value are covered under node.
 # This runs them through njs, including nginx's merging of repeated Cookie
 # headers, which nothing else exercises.
-with() { curl -ks -A "$ua" -H 'Sec-Fetch-Dest: empty' "$@" "$URL/"; }
+with() { curl -ks -A "$ua" "$@" "$URL/"; }
 name=${cookie%%=*}
 body=$(with -H "Cookie: $name=0.0; $cookie")
 [ "$body" = "backend-root" ] || fail "a junk duplicate masked the valid cookie"
@@ -261,7 +286,7 @@ echo "== counters =="
 counters=$(curl -ks "$URL/__antibot_status")
 while IFS= read -r line; do echo "  $line"; done <<< "$counters"
 get_count() { echo "$counters" | awk -v k="$1" '$1 == k { print $2 }'; }
-for key in challenges accepted rejected rescreened; do
+for key in challenges accepted rejected misconfigured solved_wasm solved_js solved_slow; do
     value=$(get_count "$key")
     case $value in
         ''|*[!0-9]*) fail "the counter $key is not a number: '$value'" ;;
@@ -271,12 +296,44 @@ done
 [ "$(get_count accepted)" -gt 0 ]   || fail "no acceptance was counted"
 [ "$(get_count rejected)" -gt 0 ]   || fail "no rejection was counted"
 [ "$(get_count misconfigured)" -eq 0 ] || fail "a request found no usable secret"
+[ "$(get_count solved_wasm)" -eq 1 ] || fail "one report was counted as $(get_count solved_wasm)"
 [ "$(get_count bits)" -eq 22 ] || fail "the counters report bits=$(get_count bits)"
+[ "$(get_count window)" -eq 21600 ] || fail "the counters report window=$(get_count window)"
 case $counters in
     *"zone antibot"*) ;;
     *) fail "the shared zone is not in use: $counters" ;;
 esac
 ok "the counters match what this run caused"
+
+echo "== a reload =="
+
+# nginx passes a variable the master inherited when it started, and a reload
+# does not change the master's environment. The module reads its settings when
+# the configuration is loaded, so a reload signalled from an environment with
+# another secret keeps the old one, and rotating the secret takes a stop and a
+# start. The shared zone outlives the reload, and the counters with it. Both
+# hold under njs 0.8.2 and 0.9.4.
+probe() { curl -ks -A probe/1 "$URL/" | grep -o 'var challenge="[0-9a-f]*"'; }
+reload() {
+    local before
+    before=$(pgrep -P "$(cat "$TMP/nginx.pid")" | sort | tr '\n' ' ')
+    env "$@" nginx -c "$TMP/nginx.conf" -p "$TMP" -s reload
+    local _
+    for _ in $(seq 40); do
+        sleep 0.25
+        [ "$(pgrep -P "$(cat "$TMP/nginx.pid")" | sort | tr '\n' ' ')" != "$before" ] && return 0
+    done
+    fail "the reload replaced no worker"
+}
+before=$(probe)
+challenges=$(get_count challenges)
+reload ANTIBOT_SECRET="$(secret)"
+[ "$(probe)" = "$before" ] || fail "a reload changed the secret"
+ok "a reload keeps the secret the master started with"
+counters=$(curl -ks "$URL/__antibot_status")
+[ "$(get_count challenges)" -gt "$challenges" ] \
+    || fail "the counters read $(get_count challenges) after the reload, $challenges before it"
+ok "the counters survive a reload: $challenges challenges before, $(get_count challenges) after"
 
 echo "== a configuration warning is written once =="
 

@@ -6,6 +6,11 @@
 # this line there.
 load_module modules/ngx_http_js_module.so;
 
+# Each variable reaches the module from the environment nginx started in, and
+# a reload keeps the values the master started with, so a new value takes a
+# stop and a start. Whether the env NAME=value form reaches the module depends
+# on the njs version, so set values in the environment.
+
 # At least 32 characters.
 env ANTIBOT_SECRET;
 
@@ -17,8 +22,8 @@ env ANTIBOT_SITE_NAME;
 env ANTIBOT_COOKIE_NAME;
 env ANTIBOT_WINDOW_SIZE;
 env ANTIBOT_COOKIE_TTL;
-env ANTIBOT_RESCREEN_RATE;
 env ANTIBOT_CHALLENGE_LOG_LEVEL;
+env ANTIBOT_REPORT_PATH;
 
 events {
     worker_connections 1024;
@@ -59,20 +64,29 @@ http {
             js_content antibot.serve_challenge;
 
             # The page carries its script and style inline, builds the JS
-            # solver with new Function, compiles the wasm one, and runs both
-            # in a blob worker. A site-wide policy stricter than this stops
-            # every solver and the visitor reads "Verification failed".
-            # add_header Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'unsafe-inline'; worker-src blob:; base-uri 'none'; form-action 'none'" always;
+            # solver with new Function, compiles the wasm one, runs both in a
+            # blob worker, and sends its solve report to this origin. A
+            # site-wide policy stricter than this stops every solver and the
+            # visitor reads "Verification failed".
+            # add_header Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'unsafe-inline'; worker-src blob:; connect-src 'self'; base-uri 'none'; form-action 'none'" always;
         }
 
-        # What this worker has done since it started. The numbers say how
-        # much of the traffic is being challenged, so keep the location
-        # restricted.
+        # What every worker has counted since the zone was created; the zone
+        # survives a reload. The numbers say how much of the traffic is being
+        # challenged, so keep the location restricted.
         location = /__antibot_status {
             allow 127.0.0.1;
             allow ::1;
             deny  all;
             js_content antibot.status;
+        }
+
+        # The page reports the solver that won and its rate here after it
+        # stores the cookie. Gated, so only a client holding a valid cookie
+        # is counted.
+        location = /__antibot_report {
+            auth_request /__antibot_check;
+            js_content   antibot.report;
         }
 
         # Non-browser routes, and anything that receives a submission, must

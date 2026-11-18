@@ -13,8 +13,13 @@ jobs:
   # Compiles the solver, assembles the deployable module and tests both. No
   # binary is committed, so this is the only place dist/ comes from.
   build:
-    runs-on: ubuntu-latest
+    # The image is named, not latest, because the compiler comes from its
+    # archive: clang-18 is the one every release has been built with.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      CLANG: clang-18
+      CLANG_MAJOR: '18'
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -22,14 +27,13 @@ jobs:
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: '26'
-      - name: install clang and lld
-        run: sudo apt-get update && sudo apt-get install -y clang lld
+      - name: install clang-18 and lld-18
+        run: sudo apt-get update && sudo apt-get install -y clang-18 lld-18
       - name: toolchain
         run: |
-          clang --version | head -1
-          wasm-ld --version || true
+          "$CLANG" --version | head -1
+          dpkg-query -W clang-18 lld-18
           node --version
-          clang --print-targets | grep -i wasm || true
       # Split so the job metadata names the stage that failed, without
       # needing the log.
       - name: compile and assemble
@@ -106,9 +110,15 @@ jobs:
   # Loads the built module in njs under a real nginx. This is the only lane
   # where the module runs in njs rather than node, so it is what catches a
   # construct njs does not support.
+  # Both images, so the module runs under the njs each ships: 0.8.2 on
+  # ubuntu-24.04 and 0.9.4 on ubuntu-26.04.
   example:
     needs: build
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
@@ -130,12 +140,26 @@ jobs:
       # module under a temporary prefix and needs no privilege.
       - name: run the module under nginx
         run: ./test/nginx/check.sh dist/antibot.js 8443
+      # The page in a real browser, under the policy the example sets: once on
+      # the wasm solver, and once with the JIT off, where Chromium has no
+      # WebAssembly and the page runs the JS solver. The browser loads only a
+      # page this job serves, and runs without its sandbox, which needs user
+      # namespaces the runner image restricts.
+      - name: the page in Chromium
+        run: |
+          chrome=$(command -v google-chrome)
+          "$chrome" --version
+          node test/browser/page.mjs "$chrome" dist/antibot.js --bits 18 --no-sandbox
+          node test/browser/page.mjs "$chrome" dist/antibot.js --bits 16 --no-sandbox \
+            --js-flags=--jitless
 
   # Compiles the solver natively through a shim for the wasm SIMD header and
   # checks every answer against OpenSSL's SHA-256, under AddressSanitizer,
   # UndefinedBehaviorSanitizer, libFuzzer and valgrind.
   sanitize:
-    runs-on: ubuntu-latest
+    # Named rather than latest: on ubuntu-26.04 valgrind 3.26.0 exits 1 with
+    # no error printed, where 3.22.0 on this image reports and passes.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1

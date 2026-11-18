@@ -303,11 +303,27 @@ if (byName['wasm SIMD'] && byName['pure JS']) {
     console.log("");
 }
 
-if (rates['wasm SIMD'] && rates['pure JS']) {
-    console.log("SIMD is " + (rates['wasm SIMD'] / rates['pure JS']).toFixed(2) +
-                "x the JS fallback (" +
-                (Math.log2(rates['wasm SIMD'] / rates['pure JS'])).toFixed(1) + " bits)");
-}
+/* The SIMD solver ships to be faster than the fallback. Both rates come from
+   this process on this machine, and the JS solver is compiled by the engine
+   rather than by clang, so the machine's speed cancels in the ratio. CI
+   measured 1.73 to 2.64 over 32 runs of the clang 18 build, and the same
+   source built at -O0 measures 0.15. A loss of a few percent is not this
+   check's to catch: build.sh pins the compiler for that. */
+const SIMD_LEAD_FLOOR = 1.4;
+
+await section('the SIMD solver keeps its lead over the JS fallback', () => {
+    if (!rates['wasm SIMD'] || !rates['pure JS']) {
+        fail('a solver rate is missing, so the lead was not measured');
+        return;
+    }
+    const lead = rates['wasm SIMD'] / rates['pure JS'];
+    console.log("SIMD is " + lead.toFixed(2) + "x the JS fallback (" +
+                Math.log2(lead).toFixed(1) + " bits), floor " + SIMD_LEAD_FLOOR + "x");
+    if (lead < SIMD_LEAD_FLOOR) {
+        fail('SIMD is ' + lead.toFixed(2) + 'x the JS fallback, below the floor of ' +
+             SIMD_LEAD_FLOOR + 'x');
+    }
+});
 await test("every check ran inside a named test", () => {
     if (failures > claimed) {
         throw new Error((failures - claimed) + ' check(s) failed outside a test');

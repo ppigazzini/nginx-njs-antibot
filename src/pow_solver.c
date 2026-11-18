@@ -25,14 +25,15 @@
  *
  * 3. No division in the hot loop. Consecutive nonces differ by one decimal
  *    digit almost always, so the nonce is incremented in place in the block
- *    instead of being re-derived. wasm32 has no 64-bit divide instruction and
- *    would otherwise call a software routine for every attempt.
+ *    instead of being re-derived, which divides by ten per digit.
+ *    docs/design.md gives the measured cost of re-deriving.
  *
  * 4. A message schedule specialised on the nonce's decimal width. Only the
  *    digit bytes differ between groups, so the schedule words past them are
  *    identical in all four lanes and constant until the width changes. They
- *    are loaded once and kept, which leaves three words to rebuild per group
- *    instead of sixteen.
+ *    are loaded once and kept, which leaves (digits + 4) / 4 words to rebuild
+ *    per group instead of sixteen: two for nonces of 4 to 7 digits, three for
+ *    8 to 11.
  *
  * The difficulty test only inspects the first output word: the caller clamps
  * bits to 32, so h1..h7 are never computed on the search path.
@@ -383,11 +384,16 @@ static v128_t sha256x4_compress_h0(const uint32_t state[SHA256_STATE_WORDS],
                                    const uint8_t blocks[SIMD_LANES][SHA256_BLOCK_BYTES],
                                    schedule_t *sched) {
     v128_t *const w = sched->w;
+    /* Each lane's word is loaded into its lane, and one shuffle byte-swaps all
+     * four. Built from four scalar big-endian loads instead, the gather is
+     * left to the SLP vectorizer, which clang 23 lowers to byte shuffles and
+     * widening chains 6 to 13 percent slower than clang 22's lowering. */
     for (unsigned i = 0; i < sched->varying; i++) {
-        w[i] = wasm_i32x4_make((int32_t)load_be32(blocks[0] + 4u * i),
-                               (int32_t)load_be32(blocks[1] + 4u * i),
-                               (int32_t)load_be32(blocks[2] + 4u * i),
-                               (int32_t)load_be32(blocks[3] + 4u * i));
+        v128_t v = wasm_v128_load32_zero(blocks[0] + 4u * i);
+        v = wasm_v128_load32_lane(blocks[1] + 4u * i, v, 1);
+        v = wasm_v128_load32_lane(blocks[2] + 4u * i, v, 2);
+        v = wasm_v128_load32_lane(blocks[3] + 4u * i, v, 3);
+        w[i] = wasm_i8x16_shuffle(v, v, 3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
     }
     for (unsigned i = 16u; i < SHA256_ROUNDS; i++) {
         w[i] = wasm_i32x4_add(

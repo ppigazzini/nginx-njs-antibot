@@ -49,6 +49,17 @@ runtime.
   the `=` form is why a challenged request answers 200.
 - [`env`](https://nginx.org/en/docs/ngx_core_module.html#env): how every
   setting reaches the module.
+- [`$request_uri`](https://nginx.org/en/docs/http/ngx_http_core_module.html#var_request_uri):
+  the URI the challenge line logs, which `error_page` leaves unchanged.
+
+## Addresses
+
+- [RFC 6052](https://www.rfc-editor.org/rfc/rfc6052): the well-known prefix
+  `64:ff9b::/96` and how IPv4/IPv6 translation embeds an IPv4 address.
+- [RFC 8215](https://www.rfc-editor.org/rfc/rfc8215): the local-use
+  translation prefix `64:ff9b:1::/48`.
+- [RFC 4380](https://www.rfc-editor.org/rfc/rfc4380): Teredo, which carries
+  its server's IPv4 address in `2001::/32` addresses.
 
 ## Supply chain
 
@@ -65,9 +76,10 @@ runtime.
 
 ## The browser side
 
+- [Beacon](https://www.w3.org/TR/beacon/): `navigator.sendBeacon`, which sends
+  the solve report.
+
 - [Cookie prefixes, RFC 6265bis](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis#name-cookie-name-prefixes):
   what `__Host-` requires and what it guarantees.
-- [Fetch Metadata](https://www.w3.org/TR/fetch-metadata/): `Sec-Fetch-Dest`,
-  which the re-screening rule reads to tell a navigation from a subresource.
 - [Content Security Policy Level 3](https://www.w3.org/TR/CSP3/):
   `'wasm-unsafe-eval'` and the directives the challenge page needs.

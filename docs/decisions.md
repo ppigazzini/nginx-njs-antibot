@@ -23,6 +23,15 @@ allows.** Two clients whose fields agree to 256 characters share an identity.
 Real values are far shorter, and the alternative is letting a large header buy
 a large HMAC.
 
+**A translated address is not folded to its /64.** `64:ff9b::/96`,
+`64:ff9b:1::/48` and Teredo's `2001::/32` hold one IPv4 client per address. Two
+IPv4 clients of one translator, with one User-Agent and Accept-Language,
+shared a challenge, and a cookie solved by one was accepted for the other. The
+well-known prefix is reduced to the IPv4 address it carries, so a client
+reaching the site over IPv4 and through the translator keeps one identity.
+The local-use prefix embeds the address where the operator's prefix length
+puts it, which the module cannot know, so it and Teredo are kept whole.
+
 ## The cookie
 
 **A cookie is accepted for its own slot and the one after it.** That is what
@@ -35,6 +44,18 @@ rest are not read.** Capping the number tried cannot lock a visitor out: the
 name, and only something else sends more. Raising the cap to accommodate a
 browser with many stale cookies would be accommodating a case that cannot
 happen.
+
+**There is no re-screening.** A re-screen answered a valid cookie with 401
+for a fraction of navigations. It was optional for the client, which chooses
+`Sec-Fetch-Dest`, and it revoked nothing: the page it served carried the
+challenge the cookie already answered, because the challenge is a function of
+the identity and the slot. At a rate of 0.5 over 2,000 navigations, a client
+that resent its cookie made 2.02 requests per navigation and computed no hash
+after its first solve, while a browser that ran the page solved the same
+challenge again. Binding a re-screened cookie needs per-identity state in the
+zone, and the zone is per host, so a client that reaches another host escapes
+it. The cost of reusing a cookie is the rate limit, which belongs in
+`limit_req`.
 
 **The challenge page is never cached.** It carries a per-identity challenge,
 so a shared cache entry would hand one identity's challenge to another.
@@ -90,6 +111,19 @@ than corrupting memory.
 module containing SIMD instructions fails validation as a whole on an engine
 without SIMD, even where those functions are never called.
 
+**An invalid setting falls back and is never kept.** A setting is the first
+valid value among the environment, the constant in the source and the
+built-in value. A source constant was once kept however wrong:
+`WINDOW_SIZE = 0` put `slot=Infinity` in the page and locked out every
+visitor. `Number()` read whitespace as 0, accepted `0x18` as 24 unreported,
+and turned `22.5` into a difficulty of 16, 64 times easier than the default.
+A number is now decimal digits and nothing else.
+
+**`COOKIE_TTL` defaults to twice the window in effect.** The constant was
+`2 * WINDOW_SIZE`, which follows the source window and not the environment's,
+so `ANTIBOT_WINDOW_SIZE=86400` alone was reported as a lifetime below twice
+the window. `null` means twice the window the module runs with.
+
 **A configuration warning is written once, through the shared zone.** njs
 clones a VM per request from the configuration scope, so anything a request
 writes to a module variable is gone before the next one reads it. Draining a
@@ -112,8 +146,8 @@ quote or a brace wrong in the page reached a browser rather than the build.
 Substituting into it on every request would put the length of the page, which
 is mostly the embedded solver, into the cost of serving one.
 
-**The tag is `v` and the version.** `package.json` holds `0.1.0` and the tag
-is `v0.1.0`.
+**The tag is `v` and the version.** For version `0.1.0` in `package.json` the
+tag is `v0.1.0`.
 [SemVer 2.0.0](https://semver.org/#is-v123-a-semantic-version) states that
 `v1.2.3` is not a semantic version and illustrates its tag as
 `git tag v1.2.3`. Go modules require the prefix on tags and release tooling
@@ -129,6 +163,19 @@ reachable, so the release is made against a ref rather than a hash.
 version stamped into the artifact must already agree. Publishing onto a tag
 that names another commit would attach this build to that one, because
 `gh release create --target` applies only when the tag is new.
+
+**CI builds with clang 18 from the Ubuntu 24.04 archive.** One source gives a
+different `solve()` under each clang major, and an unpinned `clang` follows
+the runner image. With the gather written as explicit lane loads, the three
+compilers measured run within a few percent of each other: medians of 8.96,
+9.00 and 9.13M hashes/sec for clang 18, 8.87 to 9.04 for clang 20 and 9.01 to
+9.06 for clang 23, interleaved on one core under node 26.4.0. Rates on that
+machine move by a few percent between sessions, so builds are compared within
+one run. clang 18 is the
+compiler every release has shipped, its archive package is signed by Ubuntu
+and installed on the runner without another source, and it rebuilds the
+v0.0.2 wasm byte for byte. apt.llvm.org packages carry a snapshot date and
+change within a major.
 
 **Provenance is signed in the `publish` job, not in `build`.** `build` runs
 for every push and pull request. Signing there needs `ci.yml` to grant
@@ -154,7 +201,31 @@ check in CI is a job that fails. In code scanning mode zizmor-action does not
 fail on a finding, and the upload needs `security-events: write` from both
 callers of `build.yml`.
 
+## Reporting
+
+**The page reports through a beacon to a gated location, not a second
+cookie.** `location.reload()` cannot carry a header. A second cookie travels
+on every request to the site, so it puts another attacker-controlled input on
+the gated path, and counting it once per solve needs state. The beacon is one
+request per solve, reaches `report()` only with a valid cookie, and is
+dropped without harm where the location is missing.
+
+**A visitor with no JIT is served at the default difficulty.** Chromium with
+the JIT off has no WebAssembly and runs the JS solver at 0.019M hashes/sec per
+core, so a mean solve at 22 bits takes 72 s on four workers and 221 s on one.
+Lowering the default for that visitor lowers it for every client. The solve
+report counts the visitors on that path, `solved_js` and `solved_slow`, which
+is what a change of default would rest on.
+
 ## Tests
+
+**The SIMD solver's lead is asserted as a ratio, with a floor of 1.4.** Both
+rates come from one process over batches of 4,000,000 nonces, and the JS
+solver is compiled by the engine rather than by clang, so the machine's speed
+cancels; the ratio is not taken against a small input. CI measured 1.73 to
+2.64 over 32 runs of the clang 18 build, and an `-O0` build measures 0.15.
+A loss of a few percent is the compiler pin's to prevent, not this check's to
+catch.
 
 **The fuzz corpus cache key rotates with the run id.** GitHub states that a
 cache entry cannot be changed, and a save against an existing key is skipped,
