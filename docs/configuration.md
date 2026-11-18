@@ -18,10 +18,10 @@ must match on every host serving the site;
 
 A variable reaches the module from the environment the nginx master process
 started in. A reload keeps the values the master started with, so a new value
-takes a stop and a start. The `env NAME=value;` form sets a variable for the
-worker processes after the module has read its settings, so it does not reach
-the module. Both hold under nginx 1.24.0 with njs 0.8.2, and
-`test/nginx/check.sh` asserts them.
+takes a stop and a start; `test/nginx/check.sh` asserts it under njs 0.8.2 and
+0.9.4. Whether the `env NAME=value;` form reaches the module depends on the
+njs version: njs 0.8.2 with nginx 1.24.0 ignored it on a reload and on a
+start, and njs 0.9.4 applied it on a reload. Set values in the environment.
 
 ## Contract
 

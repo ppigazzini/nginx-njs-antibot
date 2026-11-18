@@ -110,9 +110,15 @@ jobs:
   # Loads the built module in njs under a real nginx. This is the only lane
   # where the module runs in njs rather than node, so it is what catches a
   # construct njs does not support.
+  # Both images, so the module runs under the njs each ships: 0.8.2 on
+  # ubuntu-24.04 and 0.9.4 on ubuntu-26.04.
   example:
     needs: build
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
@@ -151,7 +157,9 @@ jobs:
   # checks every answer against OpenSSL's SHA-256, under AddressSanitizer,
   # UndefinedBehaviorSanitizer, libFuzzer and valgrind.
   sanitize:
-    runs-on: ubuntu-latest
+    # Named rather than latest: on ubuntu-26.04 valgrind 3.26.0 exits 1 with
+    # no error printed, where 3.22.0 on this image reports and passes.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1

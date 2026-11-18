@@ -6,15 +6,15 @@
   [`ngx_http_js_module`](https://nginx.org/en/docs/http/ngx_http_js_module.html)
   and
   [`ngx_http_auth_request_module`](https://nginx.org/en/docs/http/ngx_http_auth_request_module.html).
-  CI runs the module under njs 0.8.2; the newest library method it uses is
-  `String.prototype.startsWith`.
+  CI runs the module under njs 0.8.2 on Ubuntu 24.04 and njs 0.9.4 on Ubuntu
+  26.04; the newest library method it uses is `String.prototype.startsWith`.
 - `ANTIBOT_SECRET` in the environment nginx starts in, exported to the
   workers with `env ANTIBOT_SECRET;`, at least 32 characters. A reload keeps
   the secret the master started with, so rotating it, after a leak or
   otherwise, takes a stop and a start, and invalidates every cookie in
   circulation. Every other setting is optional and read the same way;
-  [configuration](configuration.md) lists them and says why a reload and the
-  `env NAME=value;` form do not change them.
+  [configuration](configuration.md) lists them and says what a reload and
+  the `env NAME=value;` form do to them.
 - Every host serving the site needs the same `ANTIBOT_SECRET`,
   `ANTIBOT_WINDOW_SIZE`, `ANTIBOT_COOKIE_NAME` and `ANTIBOT_POW_BITS`. A
   cookie is solved against one host and presented to the next, and those four

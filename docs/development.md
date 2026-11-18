@@ -133,8 +133,7 @@ it needs no privilege and touches nothing outside it. It asserts the gate, the
 status and headers, the documented policy, a setting arriving from the
 environment, the error log and the URI it names, the accept path, the solve
 report, cookie handling as nginx merges it, the routes, the counters, and
-what a reload changes: the secret, the counters, and an `env NAME=value;`
-line.
+that a reload keeps both the secret and the counters.
 
 ## Measurements
 
@@ -191,8 +190,9 @@ release, so the commit it names stays reachable. The guards are functions in
 `test/release/guards.sh`, and `test/release/check.sh` runs them over a table
 of tags on every push, because they otherwise run once per release.
 
-The `example` job runs `test/nginx/check.sh`, the [nginx lane](#under-nginx).
-It is the only place the module runs in njs, not node. It then runs
+The `example` job runs `test/nginx/check.sh`, the [nginx lane](#under-nginx),
+on `ubuntu-24.04` and `ubuntu-26.04`, under the njs each ships. It is the only
+place the module runs in njs, not node. It then runs
 `test/browser/page.mjs` in the runner's Chrome, once on the wasm solver and
 once with the JIT off, so the page solves, sends its report and is accepted
 under the documented policy in a real browser.

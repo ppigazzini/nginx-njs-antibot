@@ -6,9 +6,10 @@
 # this line there.
 load_module modules/ngx_http_js_module.so;
 
-# Each variable reaches the module from the environment nginx started in. A
-# reload keeps the values the master started with, and the env NAME=value form
-# does not reach the module, so a new value takes a stop and a start.
+# Each variable reaches the module from the environment nginx started in, and
+# a reload keeps the values the master started with, so a new value takes a
+# stop and a start. Whether the env NAME=value form reaches the module depends
+# on the njs version, so set values in the environment.
 
 # At least 32 characters.
 env ANTIBOT_SECRET;
