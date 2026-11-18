@@ -5,7 +5,9 @@
  * launch(binary, flags) starts the browser on a fresh profile and resolves
  * with { page(url), close() }. page() opens a tab and resolves with
  * evaluate(expression), which awaits a promise the expression returns and
- * gives back its value.
+ * gives back its value. close() resolves once the browser has exited and its
+ * profile is removed: a browser still exiting writes into the profile, and
+ * removing it then fails.
  */
 
 import fs from 'node:fs';
@@ -64,10 +66,14 @@ export async function launch(binary, flags = []) {
                 }
             };
         },
-        close() {
+        async close() {
             ws.close();
-            browser.kill();
-            fs.rmSync(profile, { recursive: true, force: true });
+            if (browser.exitCode === null && browser.signalCode === null) {
+                const exited = new Promise((resolve) => browser.once('exit', resolve));
+                browser.kill();
+                await exited;
+            }
+            fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
         }
     };
 }

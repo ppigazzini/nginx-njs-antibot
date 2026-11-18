@@ -120,7 +120,7 @@ try {
     ok = seen.accepted > 0 && seen.reports.length === 1 && seen.reports[0].code === 204 &&
          seen.reports[0].args.solver === (wasm === 'object' ? 'wasm' : 'js');
 } finally {
-    browser.close();
+    await browser.close();
     server.close();
 }
 process.exit(ok ? 0 : 1);

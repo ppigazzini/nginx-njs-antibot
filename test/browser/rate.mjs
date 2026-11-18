@@ -98,6 +98,6 @@ try {
                     sorted[sorted.length - 1].toFixed(3) + '  n ' + sorted.length);
     }
 } finally {
-    browser.close();
+    await browser.close();
     server.close();
 }
