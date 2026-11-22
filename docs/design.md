@@ -27,9 +27,10 @@ them. Widths change only at powers of ten.
 **No division in the hot loop.** Consecutive nonces differ by one decimal
 digit almost always, so the nonce is incremented in place in the block rather
 than re-derived, which divides by ten per digit. A clang 18 build that
-re-derives every lane of every group with `build_final_block()` runs 20 to 21
-percent slower: 6.82 to 6.93M hashes/sec against 8.64 to 8.65M for the
-in-place increment, medians of three runs of `test/bench/rate.mjs` on the
+re-derives every lane of every group with `build_final_block()`,
+`test/bench/rederive.patch`, runs 20 to 21 percent slower: 6.82 to 6.93M
+hashes/sec against 8.64 to 8.65M for the in-place increment, medians of three
+runs of `test/bench/rate.mjs` on the
 [reference core](security.md#solver-rates).
 
 ## The wasm solver
@@ -90,10 +91,19 @@ The module is compiled once on the main thread and the compiled
 That gives one compile, one SIMD feature test, and no per-worker copy of the
 payload.
 
-Scaling on 4 physical and 8 logical cores: 1.91x at two workers, 3.07x at
-four, 3.94x at eight. Logical cores share execution units, so it is sublinear
-past two; per-worker balance is 97% at four. Half the cores leaves the machine
-usable, and all of them yield 31% more.
+The summed rate of N workers over one, from `test/browser/rate.mjs --workers
+N` in headless Chromium 156.0.8078.4 on the Intel i7-3770K, 4 cores and 8
+threads, unpinned, two runs on 2026-11-22:
+
+| Solver | 1 worker | 2 workers | 4 workers | 8 workers |
+|---|---|---|---|---|
+| wasm SIMD | 8.66 to 8.73M | 1.97 to 2.00x | 3.27x | 4.32 to 4.34x |
+| pure JS | 3.75M | 1.81 to 1.87x | 2.86 to 3.05x | 3.40x |
+| pure JS, JIT off | 0.018 to 0.019M | 0.035 to 0.036M | 0.064 to 0.065M | 0.097 to 0.099M |
+
+Logical cores share execution units, so it is sublinear past two. Half the
+cores leaves the machine usable, and all of them yield 32% more on the wasm
+solver.
 
 ## The progress readout
 

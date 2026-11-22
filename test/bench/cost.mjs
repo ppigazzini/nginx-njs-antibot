@@ -16,6 +16,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 import { pathToFileURL } from 'node:url';
+import { machine } from './machine.mjs';
 
 const MODULE = process.argv[2] || 'dist/antibot.js';
 if (!fs.existsSync(MODULE)) {
@@ -96,6 +97,7 @@ for (let run = 0; run < RUNS; run++) {
 }
 const median = (a) => a.slice().sort((x, y) => x - y)[RUNS >> 1];
 
+console.log(machine());
 console.log('node ' + process.version + ', ' + bits + ' bits, median of ' + RUNS +
             ' runs of ' + N.toLocaleString('en-US') + ' requests');
 console.log('case'.padEnd(30) + 'check()  ' + 'check() and page on 401');

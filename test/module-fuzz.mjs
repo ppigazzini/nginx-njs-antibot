@@ -62,6 +62,8 @@ if (!process.env.ANTIBOT_SECRET || process.env.ANTIBOT_SECRET.length < 32) {
 
 const SRC = fs.readFileSync(new URL(MODULE_PATH), 'utf8');
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'antibot-fuzz-'));
+/* Removed however the run ends, so an aborted run leaves nothing behind. */
+process.on('exit', () => fs.rmSync(DIR, { recursive: true, force: true }));
 const POW_BITS_LINE = /^const POW_BITS = -?\d+;$/m;
 if (!POW_BITS_LINE.test(SRC)) {
     throw new Error('POW_BITS declaration not found; the accept pass would have ' +
@@ -194,11 +196,11 @@ const mutate = (s) => {
    a repeated argument as an array. */
 const reportArgs = () => {
     const value = () => rand(4) === 0 ? [bytes(rand(8)), bytes(rand(8))]
-                      : rand(3) === 0 ? pick(['wasm', 'js', '', '0', '1e9', '-1', ' 1'])
+                      : rand(3) === 0 ? pick(['wasm', 'js', '', '0', '01', '1e9', '-1', ' 1', '1\n'])
                       : rand(2) === 0 ? String(rand(1e13)) : bytes(rand(30));
     const args = {};
     if (rand(5) !== 0) args.solver = value();
-    if (rand(5) !== 0) args.rate = value();
+    if (rand(5) !== 0) args.ms = value();
     if (rand(4) === 0) args[bytes(rand(10))] = value();
     return args;
 };
@@ -344,28 +346,29 @@ const unconfigured = await variantFor(22);
 process.env.ANTIBOT_SECRET = savedSecret;
 const misconfigured = fuzz(unconfigured, 'no secret', 2000, []);
 
-/* A property that never executes is not being tested. Each is a named test so
-   one failing says which, and the rest still report. */
+/* A property that never executes is not being tested. Each is a named test
+   that throws, so one failing names itself and the rest still report; fail()
+   is for the passes, which the last test totals. */
 await test('the shipped pass rejects what it is given', () => {
-    if (robustness.counts[401] === 0) fail('the shipped pass rejected nothing');
+    if (robustness.counts[401] === 0) throw new Error('the shipped pass rejected nothing');
 });
 await test('report() both takes and refuses what the shipped pass sends it', () => {
     if (!robustness.reports[204] || !robustness.reports[400]) {
-        fail('the shipped pass took ' + (robustness.reports[204] || 0) + ' reports and refused ' +
+        throw new Error('the shipped pass took ' + (robustness.reports[204] || 0) + ' reports and refused ' +
              (robustness.reports[400] || 0) + '; one side of report() did not execute');
     }
 });
 await test('the accept pass reaches an acceptance and verifies it', () => {
     if (accept.verified === 0) {
-        fail('the accept pass verified no acceptance; the property did not execute');
+        throw new Error('the accept pass verified no acceptance; the property did not execute');
     }
 });
 await test('the accept pass rejects a mutated cookie', () => {
-    if (accept.mutantsRejected === 0) fail('the accept pass rejected no mutated cookie');
+    if (accept.mutantsRejected === 0) throw new Error('the accept pass rejected no mutated cookie');
 });
 await test('a module with no secret answers 500 and never 204', () => {
     if (misconfigured.counts[500] !== 2000 || misconfigured.counts[204] !== 0) {
-        fail('a module with no secret answered ' + misconfigured.counts[204] +
+        throw new Error('a module with no secret answered ' + misconfigured.counts[204] +
              ' times with 204 and ' + misconfigured.counts[500] + ' times with 500');
     }
 });

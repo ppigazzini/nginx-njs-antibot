@@ -5,6 +5,10 @@ name: build
 # and by release.yml before publishing, so both use exactly the same checks.
 on:
   workflow_call:
+    outputs:
+      antibot-sha256:
+        description: SHA-256 of the dist/antibot.js the build job uploaded
+        value: ${{ jobs.build.outputs.antibot-sha256 }}
 
 permissions:
   contents: read
@@ -17,9 +21,14 @@ jobs:
     # archive: clang-18 is the one every release has been built with.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      antibot-sha256: ${{ steps.record.outputs.antibot-sha256 }}
     env:
       CLANG: clang-18
       CLANG_MAJOR: '18'
+      # The package the rates in docs/ were measured on. An archive update
+      # fails the build rather than shipping another solve().
+      CLANG_PACKAGE: 1:18.1.3-1ubuntu1
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -34,6 +43,12 @@ jobs:
           "$CLANG" --version | head -1
           dpkg-query -W clang-18 lld-18
           node --version
+          got=$(dpkg-query -W -f '${Version}' clang-18)
+          if [ "$got" != "$CLANG_PACKAGE" ]; then
+            echo "clang-18 is $got and the build pins $CLANG_PACKAGE: rebuild," \
+                 "re-measure the rates in docs/ and raise CLANG_PACKAGE"
+            exit 1
+          fi
       # Split so the job metadata names the stage that failed, without
       # needing the log.
       - name: compile and assemble
@@ -76,8 +91,13 @@ jobs:
         # docs/development.md gives this as the way to run the suites, so a run
         # exercises it rather than only the steps above.
         run: npm test
+      # release.yml compares the file it signs with this digest.
       - name: record what was built
-        run: sha256sum dist/pow_solver.wasm dist/antibot.js
+        id: record
+        run: |
+          sha256sum dist/pow_solver.wasm dist/antibot.js
+          echo "antibot-sha256=$(sha256sum dist/antibot.js | cut -d' ' -f1)" \
+            >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: antibot

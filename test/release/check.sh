@@ -51,6 +51,18 @@ expect refuse "v0.1.0 / 0.2.0"  release_check_version v0.1.0 0.2.0
 expect refuse "v0.1.0 / v0.1.0" release_check_version v0.1.0 v0.1.0
 expect refuse "nothing stamped" release_check_version v0.1.0 ""
 expect refuse "unbuilt module"  release_check_version v0.1.0 0.0.0-unbuilt
+
+echo "== the release is made from main =="
+expect pass   "refs/heads/main"          release_check_ref refs/heads/main
+expect refuse "refs/heads/feature"       release_check_ref refs/heads/feature
+expect refuse "refs/heads/main-x"        release_check_ref refs/heads/main-x
+expect refuse "refs/tags/v0.1.0"         release_check_ref refs/tags/v0.1.0
+expect refuse "empty"                    release_check_ref ""
+
+echo "== the signed file is the file the build tested =="
+expect pass   "same digest"     release_check_digest "$SHA" "$SHA"
+expect refuse "another digest"  release_check_digest "$SHA" "$OTHER"
+expect refuse "none recorded"   release_check_digest "" "$SHA"
 echo
 if [ "$failures" -eq 0 ]; then
     echo "all release guards behave"

@@ -1,0 +1,29 @@
+# The solver with the in-place decimal increment removed: every lane of every
+# group is re-derived with build_final_block(), which divides by ten per
+# digit. docs/design.md gives its rate against the shipped solver.
+--- a/src/pow_solver.c
++++ b/src/pow_solver.c
+@@ -271,7 +271,7 @@ static unsigned build_final_block(uint64_t nonce, uint8_t block[SHA256_BLOCK_BYT
+  * Returns true when the carry ran off the leading digit, which is the only
+  * case that changes the block layout and needs a full rebuild.
+  */
+-static inline _Bool increment_decimal(uint8_t *block, unsigned count) {
++__attribute__((unused)) static inline _Bool increment_decimal(uint8_t *block, unsigned count) {
+     for (unsigned i = count; i >= 1u; i--) {
+         if (block[i] != (uint8_t)'9') {
+             block[i]++;
+@@ -424,13 +424,7 @@ static void advance_lanes(uint64_t next_base,
+                           uint8_t blocks[SIMD_LANES][SHA256_BLOCK_BYTES],
+                           unsigned digits[SIMD_LANES]) {
+     for (unsigned lane = 0; lane < SIMD_LANES; lane++) {
+-        _Bool carried = 0;
+-        for (unsigned step = 0; step < SIMD_LANES && !carried; step++) {
+-            carried = increment_decimal(blocks[lane], digits[lane]);
+-        }
+-        if (carried) {
+-            digits[lane] = build_final_block(next_base + lane, blocks[lane]);
+-        }
++        digits[lane] = build_final_block(next_base + lane, blocks[lane]);
+     }
+ }
+ 

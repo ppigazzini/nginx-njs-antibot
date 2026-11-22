@@ -82,6 +82,14 @@ mod.serve_challenge(r0);
 check(r0.code === 200, "serve_challenge did not return 200");
 const page = r0.body;
 
+/* The window the module runs with, read from status() so the suite grades
+   any ANTIBOT_WINDOW_SIZE. */
+const WINDOW = (() => {
+    const r = makeR(null);
+    mod.status(r);
+    return Number(/^window (\d+)$/m.exec(r.body)[1]);
+})();
+
 /* Reads one value out of a challenge page: the one built at load through
    fromPage, or one a variant served, through fromBody. A pattern that stops
    matching means the page changed shape, and saying so beats a TypeError from
@@ -151,7 +159,8 @@ function solveWithPool(lanes, wasmModule) {
 
 /* The SIMD path, then the fallback: passing no module is exactly what the
    page does when WebAssembly is absent or the SIMD build will not compile. */
-await section("both solver paths reach the same nonce", async () => {
+await section("both solver paths solve a challenge the module accepts", async () => {
+    const oneLane = {};
     for (const [label, b64] of [["simd   ", simdB64], ["pure JS", null]]) {
         const wasmModule = b64 ? await WebAssembly.compile(dec(b64)) : null;
         for (const lanes of [1, 4]) {
@@ -165,8 +174,58 @@ await section("both solver paths reach the same nonce", async () => {
             check(rc.code === 204, label + " lanes=" + lanes + ": solved cookie rejected (" + rc.code + ")");
             console.log("  " + label + " lanes=" + lanes + ": " + secs.toFixed(2) + "s nonce=" +
                         String(nonce).padStart(10) + " check()=" + rc.code);
+            if (lanes === 1) oneLane[label] = nonce;
         }
     }
+    /* One lane searches upward from 0 on either path, so both stop at the
+       lowest nonce that meets the difficulty: the same one. */
+    check(oneLane["simd   "] === oneLane["pure JS"],
+          "one lane found " + oneLane["simd   "] + " on the SIMD path and " +
+          oneLane["pure JS"] + " on the JS path");
+});
+
+/* The page splits the nonces below the cap between its workers in blocks of
+   262,144: lane j takes blocks j, j + lanes, and so on. The built worker runs
+   here against a solver that records each range it is given and finds
+   nothing, so a gap, an overlap or a range past the cap shows, for every lane
+   count the page picks and for caps below, at and above one block. */
+await section("the workers search every nonce below the cap once", async () => {
+    const B = 262144;
+    let cases = 0;
+    for (const b of [1, 11, 12, 13, 17, 22]) {
+        const capB = Math.pow(2, b) * 64;
+        for (let lanes = 1; lanes <= 8; lanes++) {
+            const ranges = [];
+            let tried = 0, exhausted = 0;
+            for (let l = 0; l < lanes; l++) {
+                let last = 0;
+                const recorder = {
+                    set_byte() {}, init() {},
+                    solve(start, count) { ranges.push([start, count]); return 4294967295; }
+                };
+                const wasm = { Instance: function () { this.exports = recorder; } };
+                const self = { postMessage(m) {
+                    if (m.p !== undefined) last = m.p;
+                    if (m.f) exhausted++;
+                } };
+                new Function("self", "WebAssembly", src)(self, wasm);
+                self.onmessage({ data: { c: challenge, b, m: capB, mod: {}, l, k: lanes } });
+                tried += last;
+            }
+            ranges.sort((x, y) => x[0] - y[0]);
+            let next = 0, whole = true;
+            for (const [start, count] of ranges) {
+                if (start !== next || count < 1 || count > B) whole = false;
+                next = start + count;
+            }
+            check(whole && next === capB && tried === capB && exhausted === lanes,
+                  "bits=" + b + " lanes=" + lanes + ": " + ranges.length + " ranges reach " +
+                  next + " of " + capB + (whole ? "" : " with a gap or an overlap") +
+                  ", progress " + tried + ", " + exhausted + " lanes exhausted");
+            cases++;
+        }
+    }
+    console.log("  " + cases + " (bits, lanes) cases: every nonce below the cap searched once");
 });
 
 /* Rejections. */
@@ -175,7 +234,8 @@ const cases = [
     ["tampered nonce", makeR(COOKIE_NAME + "=" + slot + "." + (good + 1))],
     ["no cookie",      makeR(null)],
     ["other IP",       makeR(COOKIE_NAME + "=" + slot + "." + good, "198.51.100.9")],
-    ["stale slot",     makeR(COOKIE_NAME + "=" + (Number(slot) - 2) + "." + good)],
+    ["nonce moved two slots back",
+                       makeR(COOKIE_NAME + "=" + (Number(slot) - 2) + "." + good)],
     ["malformed",      makeR(COOKIE_NAME + "=notaslot.notanonce")],
 ];
 await section("a request without a valid cookie is refused", async () => {
@@ -259,7 +319,7 @@ await section("no configuration skips verification", async () => {
            is 2^24 x 64 = 2^30, so the largest nonce tried sits just under it
            and reaches pow_valid() rather than stopping at the parser. */
         const strict = await variantFor(24);
-        const slotNow = Math.floor(Date.now() / 1000 / 21600);
+        const slotNow = Math.floor(Date.now() / 1000 / WINDOW);
         let accepted = 0;
         for (const n of ['0', '1', '999999', String(Math.pow(2, 30) - 1)]) {
             for (const slotTry of [slotNow, slotNow - 1]) {
@@ -458,8 +518,9 @@ await section("the page solves in a browser-shaped environment", async () => {
         check(back.code === 204,
               'page (' + label + ') cookie rejected by check() (' + back.code + ')');
 
-        /* After the cookie, the page sends the solver that won and its rate
-           to the report location, which report() accepts. */
+        /* After the cookie, the page sends the solver that won and the
+           milliseconds since navigation to the report location, which
+           report() accepts. */
         check(out.beacons.length === 1,
               'page (' + label + ') sent ' + out.beacons.length + ' reports');
         const sent = new URL(out.beacons[0] || '/', 'https://site.example');
@@ -469,8 +530,11 @@ await section("the page solves in a browser-shaped environment", async () => {
         check(sent.searchParams.get('solver') === solver,
               'page (' + label + ') reported solver=' + sent.searchParams.get('solver') +
               ', expected ' + solver);
-        check(/^[1-9][0-9]*$/.test(sent.searchParams.get('rate') || ''),
-              'page (' + label + ') reported rate=' + sent.searchParams.get('rate'));
+        const ms = sent.searchParams.get('ms') || '';
+        /* The wait counts from the page starting, so it is positive and no
+           longer than this run took. */
+        check(/^[1-9][0-9]*$/.test(ms) && Number(ms) <= Date.now() - t + 1,
+              'page (' + label + ') reported ms=' + ms + ' for a solve of ' + secs + 's');
         const rep = makeR(value, '203.0.113.7');
         rep.args = Object.fromEntries(sent.searchParams);
         mod.report(rep);
@@ -549,6 +613,7 @@ await section("settings are read from the environment", async () => {
                     cookie: pick(/var v="([^"=]+)="/),
                     maxAge: Number(pick(/Max-Age=(\d+)/)),
                     heading: pick(/<h1>([\s\S]*?)<\/h1>/),
+                    report: pick(/sendBeacon\("([^"?]*)\?solver=/),
                     logged: logged.join(' | ')
                 };
             } finally {
@@ -560,7 +625,8 @@ await section("settings are read from the environment", async () => {
         };
 
         const base = await withEnv({});
-        check(base.bits === 22 && base.cookie === COOKIE_NAME && base.heading === null,
+        check(base.bits === 22 && base.cookie === COOKIE_NAME && base.heading === null &&
+              base.report === '/__antibot_report',
               'the defaults changed with no environment set: ' + JSON.stringify(base));
 
         const set = await withEnv({
@@ -608,16 +674,17 @@ await section("settings are read from the environment", async () => {
         check(parsed === 9, 'only ' + parsed + ' of 9 malformed difficulties ran');
         console.log('  environment: 9 malformed difficulties fell back to 22 and were reported');
 
-        /* A lifetime is reported for the rule it breaks. */
-        const frac = await withEnv({ ANTIBOT_COOKIE_TTL: '50000.5' });
+        /* A lifetime is reported for the rule it breaks, against the default
+           window. */
+        const frac = await withEnv({ ANTIBOT_COOKIE_TTL: '50000.5', ANTIBOT_WINDOW_SIZE: null });
         check(frac.maxAge === 43200, 'ANTIBOT_COOKIE_TTL=50000.5 served Max-Age=' + frac.maxAge);
         check(frac.logged.indexOf('ANTIBOT_COOKIE_TTL=50000.5 is not a whole number') !== -1,
               'a fractional lifetime was reported as ' + JSON.stringify(frac.logged));
-        const huge = await withEnv({ ANTIBOT_COOKIE_TTL: '1e21' });
+        const huge = await withEnv({ ANTIBOT_COOKIE_TTL: '1e21', ANTIBOT_WINDOW_SIZE: null });
         check(huge.maxAge === 43200 && huge.logged.indexOf('ANTIBOT_COOKIE_TTL=1e21 is not') !== -1,
               'ANTIBOT_COOKIE_TTL=1e21 served Max-Age=' + huge.maxAge + ' and logged ' +
               JSON.stringify(huge.logged));
-        const short = await withEnv({ ANTIBOT_COOKIE_TTL: '600' });
+        const short = await withEnv({ ANTIBOT_COOKIE_TTL: '600', ANTIBOT_WINDOW_SIZE: null });
         check(short.logged.indexOf('ANTIBOT_COOKIE_TTL=600 is below twice WINDOW_SIZE=43200') !== -1,
               'a short lifetime was reported as ' + JSON.stringify(short.logged));
 
@@ -635,6 +702,25 @@ await section("settings are read from the environment", async () => {
               'a valid name without the __Host- prefix was replaced');
         check(loose.logged.indexOf('__Host-') !== -1,
               'no error-log line for a name without the __Host- prefix');
+
+        /* The report path is a path on this origin. A second leading slash
+           makes it a URL on another host, which the beacon would then reach. */
+        let paths = 0;
+        for (const value of ['//collector.example/r', 'report', '/a b', '/a?b']) {
+            const got = await withEnv({ ANTIBOT_REPORT_PATH: value });
+            check(got.report === '/__antibot_report', 'ANTIBOT_REPORT_PATH=' +
+                  JSON.stringify(value) + ' sent the report to ' + got.report);
+            check(got.logged.indexOf('ANTIBOT_REPORT_PATH=' + value + ' is not') !== -1,
+                  'ANTIBOT_REPORT_PATH=' + JSON.stringify(value) + ' was not reported: ' +
+                  got.logged);
+            paths++;
+        }
+        const custom = await withEnv({ ANTIBOT_REPORT_PATH: '/r/x-1' });
+        check(custom.report === '/r/x-1' && custom.logged === '',
+              'ANTIBOT_REPORT_PATH=/r/x-1 sent the report to ' + custom.report +
+              ' and logged ' + JSON.stringify(custom.logged));
+        console.log('  environment: ' + paths + ' report paths off this origin or malformed ' +
+                    'fell back and were reported; /r/x-1 was taken');
 });
 
 /* One line is written per challenge, so which level it lands at decides
@@ -700,7 +786,21 @@ await section("the challenge log line is written at the configured level", async
    drop the cookie while the module would still take it. */
 await section("a constant in the source is validated like the environment", async () => {
         const served = async (decls) => {
-            const v = await variantWith(decls);
+            /* A source constant is read only where the environment holds no
+               value, so each copy loads with none. */
+            const saved = {};
+            for (const k of ['ANTIBOT_WINDOW_SIZE', 'ANTIBOT_COOKIE_NAME', 'ANTIBOT_COOKIE_TTL']) {
+                saved[k] = process.env[k];
+                delete process.env[k];
+            }
+            let v;
+            try {
+                v = await variantWith(decls);
+            } finally {
+                for (const k of Object.keys(saved)) {
+                    if (saved[k] !== undefined) process.env[k] = saved[k];
+                }
+            }
             const logged = [];
             const r = makeR(null, '203.0.113.91');
             r.error = (m) => logged.push(m);
@@ -728,10 +828,13 @@ await section("a constant in the source is validated like the environment", asyn
         console.log('  source: WINDOW_SIZE = 0 -> ' + zero.window + ', COOKIE_NAME = "bad;name" -> ' +
                     name.cookie + ', both reported');
 
-        const WINDOW = 6 * 60 * 60;
+        /* An invalid lifetime falls back to twice the window in effect;
+           2 * WINDOW_SIZE is twice the constant in the source. */
+        const SOURCE_WINDOW = 6 * 60 * 60;
         for (const [value, expected] of [['1', 2 * WINDOW], ['0', 2 * WINDOW],
                                          ['-1', 2 * WINDOW], ['50000.5', 2 * WINDOW],
-                                         ['null', 2 * WINDOW], ['2 * WINDOW_SIZE', 2 * WINDOW],
+                                         ['null', 2 * WINDOW],
+                                         ['2 * WINDOW_SIZE', 2 * SOURCE_WINDOW],
                                          ['99999999', 99999999]]) {
             const v = await variantWith([['COOKIE_TTL', value]]);
             const r = makeR(null);
@@ -755,13 +858,14 @@ await section("a valid cookie is found within the candidate bound", async () => 
         variant.serve_challenge(served);
         const challenge = /var challenge="([0-9a-f]+)"/.exec(served.body)[1];
         const issued = /var slot="(\d+)"/.exec(served.body)[1];
-        let nonce = 0;
-        while (!(function () {
-            const hex = crypto.createHash('sha256').update(challenge + ':' + nonce).digest('hex');
+        const meets = (n) => {
+            const hex = crypto.createHash('sha256').update(challenge + ':' + n).digest('hex');
             const full = bits >> 2, rem = bits & 3;
             if (hex.slice(0, full) !== '0'.repeat(full)) return false;
             return rem ? (parseInt(hex[full], 16) >> (4 - rem)) === 0 : true;
-        })()) nonce++;
+        };
+        let nonce = 0;
+        while (!meets(nonce)) nonce++;
         const good = COOKIE_NAME + '=' + issued + '.' + nonce;
 
         /* Taken from docs/configuration.md, not from the module, so lowering the
@@ -781,9 +885,14 @@ await section("a valid cookie is found within the candidate bound", async () => 
               ' cookies and docs/configuration.md states ' + bound);
 
         /* Junk that parses and carries the right slot, so each one costs a
-           verification and none of them passes. */
-        const junk = (n) => Array.from({ length: n },
-            (_, i) => COOKIE_NAME + '=' + issued + '.' + (1000000 + i)).join('; ');
+           verification, and that is checked to fail it: at 12 bits one
+           nonce in 4,096 passes. */
+        const junkNonces = [];
+        for (let n = 1000000; junkNonces.length < bound; n++) {
+            if (!meets(n)) junkNonces.push(n);
+        }
+        const junk = (n) => junkNonces.slice(0, n)
+            .map((j) => COOKIE_NAME + '=' + issued + '.' + j).join('; ');
 
         for (let ahead = 0; ahead < bound; ahead++) {
             const header = ahead === 0 ? good : junk(ahead) + '; ' + good;
@@ -837,47 +946,49 @@ await section("a nonce at the iteration cap is refused", async () => {
 });
 
 /* A cookie is accepted for its own slot and the one after it, which is what
-   COOKIE_TTL is set from. Only the reject side of that boundary was covered.
-   The clock moves back one window so the module issues the previous slot's
-   challenge through its own derivation, rather than a copy of it here. */
+   COOKIE_TTL is set from. The clock moves back so the module issues each older
+   slot's challenge through its own derivation, and each cookie is solved for
+   the slot it names: a cookie relabelled to an older slot fails on its nonce,
+   whatever the window. */
 await section("a cookie works across the slot boundary and no further", async () => {
         const bits = 12;
         const variant = await variantFor(bits);
         const realNow = Date.now;
-        const slotNow = Math.floor(realNow() / 1000 / 21600);
-        let cookie = null;
-        try {
-            Date.now = () => realNow() - 21600 * 1000;
-            const served = makeR(null, '203.0.113.44');
-            variant.serve_challenge(served);
-            const challenge = /var challenge="([0-9a-f]+)"/.exec(served.body)[1];
-            const issued = Number(/var slot="(\d+)"/.exec(served.body)[1]);
-            check(issued === slotNow - 1,
-                  'the clock move issued slot ' + issued + ', expected ' + (slotNow - 1));
-            let nonce = 0;
-            while (!(function () {
-                const hex = crypto.createHash('sha256')
-                                  .update(challenge + ':' + nonce).digest('hex');
-                const full = bits >> 2, rem = bits & 3;
-                if (hex.slice(0, full) !== '0'.repeat(full)) return false;
-                return rem ? (parseInt(hex[full], 16) >> (4 - rem)) === 0 : true;
-            })()) nonce++;
-            cookie = COOKIE_NAME + '=' + issued + '.' + nonce;
-        } finally {
-            Date.now = realNow;
-        }
-        const now = makeR(cookie, '203.0.113.44');
-        variant.check(now);
-        check(now.code === 204,
-              'a cookie solved in the previous slot was answered ' + now.code);
-        const older = makeR(cookie.replace('=' + (slotNow - 1) + '.', '=' + (slotNow - 2) + '.'),
-                            '203.0.113.44');
-        variant.check(older);
-        check(older.code === 401,
-              'a cookie two slots old was answered ' + older.code);
-        console.log('  slot boundary: previous slot ' + now.code +
-                    ', two slots back ' + older.code +
-                    ', COOKIE_TTL covers ' + (2 * 6) + 'h');
+        const slotNow = Math.floor(realNow() / 1000 / WINDOW);
+        const solvedBack = (windows) => {
+            try {
+                Date.now = () => realNow() - windows * WINDOW * 1000;
+                const served = makeR(null, '203.0.113.44');
+                variant.serve_challenge(served);
+                const challenge = /var challenge="([0-9a-f]+)"/.exec(served.body)[1];
+                const issued = Number(/var slot="(\d+)"/.exec(served.body)[1]);
+                check(issued === slotNow - windows, 'the clock moved ' + windows +
+                      ' windows back issued slot ' + issued + ', expected ' + (slotNow - windows));
+                let nonce = 0;
+                while (!(function () {
+                    const hex = crypto.createHash('sha256')
+                                      .update(challenge + ':' + nonce).digest('hex');
+                    const full = bits >> 2, rem = bits & 3;
+                    if (hex.slice(0, full) !== '0'.repeat(full)) return false;
+                    return rem ? (parseInt(hex[full], 16) >> (4 - rem)) === 0 : true;
+                })()) nonce++;
+                return COOKIE_NAME + '=' + issued + '.' + nonce;
+            } finally {
+                Date.now = realNow;
+            }
+        };
+        const verdict = (cookie) => {
+            const r = makeR(cookie, '203.0.113.44');
+            variant.check(r);
+            return r.code;
+        };
+        const previous = verdict(solvedBack(1));
+        check(previous === 204, 'a cookie solved in the previous slot was answered ' + previous);
+        const older = verdict(solvedBack(2));
+        check(older === 401, 'a cookie solved two slots back was answered ' + older);
+        console.log('  slot boundary: solved in the previous slot ' + previous +
+                    ', solved two slots back ' + older +
+                    ', COOKIE_TTL covers ' + (2 * WINDOW / 3600) + 'h');
 });
 
 /* The cookie is __Host- and Secure, so a browser that reached the page over
@@ -1067,6 +1178,38 @@ await section("the request cost does not track cookie count", async () => {
                     ' us, growth ' + growth.toFixed(2) + 'x');
 });
 
+/* serve_challenge() logs $request_uri, which the client writes, through
+   log_field(), which encodes it a character at a time. A request line may be
+   as long as large_client_header_buffers allows, so the encoding has to stop
+   at the clip, and the same growth test applies. Without the clip this took
+   5.90x. */
+await section("the challenge cost does not track URI size", async () => {
+        const cost = (uri) => {
+            const N = 300;
+            const one = () => {
+                const r = makeR(null, '203.0.113.9');
+                r.variables.request_uri = uri;
+                return r;
+            };
+            for (let i = 0; i < 100; i++) mod.serve_challenge(one());
+            const t = process.hrtime.bigint();
+            for (let i = 0; i < N; i++) mod.serve_challenge(one());
+            return Number(process.hrtime.bigint() - t) / 1000 / N;
+        };
+        const logged = makeR(null);
+        logged.variables.request_uri = '/' + 'M'.repeat(8191);
+        mod.serve_challenge(logged);
+        check(logged.logged.length === 1, 'serve_challenge wrote ' + logged.logged.length +
+              ' lines for one request, so the URI was not measured');
+        const big = median3(() => cost('/' + 'M'.repeat(8191)));
+        const bigger = median3(() => cost('/' + 'M'.repeat(65535)));
+        const growth = bigger / big;
+        check(growth < 2, 'a 64 KB URI costs ' + growth.toFixed(2) +
+                          'x an 8 KB one; the logged URI is not being clipped');
+        console.log('  challenge cost: 8 KB URI ' + big.toFixed(1) + ' us, 64 KB ' +
+                    bigger.toFixed(1) + ' us, growth ' + growth.toFixed(2) + 'x');
+});
+
 /* nginx writes one error-log line per call. The line carries $request_uri,
    what the client asked for, because after error_page r.uri is the internal
    location. Every field the module logs is encoded first, so a newline in one
@@ -1187,8 +1330,7 @@ await section("the counters report what the module did", async () => {
               'one acceptance was counted as ' + read().accepted);
 
         /* A report counts its solver, and counts a solve as slow when the
-           reported rate puts the mean solve at this difficulty above ten
-           seconds. 2^22 hashes at 419,431 per second is 10.0 s. */
+           visitor waited more than ten seconds for it. */
         const send = (args) => {
             const r = makeR(null, '203.0.113.73');
             r.args = args;
@@ -1197,31 +1339,38 @@ await section("the counters report what the module did", async () => {
             counted.report(r);
             return { code: r.code, seen };
         };
-        const fast = send({ solver: 'wasm', rate: '8400000' });
+        const fast = send({ solver: 'wasm', ms: '240' });
         check(fast.code === 204, 'a valid report was answered ' + fast.code);
-        check(fast.seen.some((m) => m.indexOf('solver=wasm rate=8400000') !== -1),
+        check(fast.seen.some((m) => m.indexOf('solver=wasm ms=240') !== -1),
               'a report was not logged: ' + JSON.stringify(fast.seen));
-        send({ solver: 'js', rate: '132000' });
-        send({ solver: 'wasm', rate: '419431' });
-        send({ solver: 'wasm', rate: '419430' });
+        send({ solver: 'js', ms: '72000' });
+        send({ solver: 'wasm', ms: '10001' });
+        send({ solver: 'wasm', ms: '10000' });
+        /* "1\n" and "1\n\n" pass /^[0-9]+$/ under njs, where $ also matches
+           before a final newline; node refuses them either way, so the
+           nginx lane is what shows report() refusing the first. */
+        const malformed = [{}, { solver: 'wasm' }, { ms: '1' },
+                           { solver: 'gpu', ms: '1' }, { solver: 'js', ms: '1.5' },
+                           { solver: 'js', ms: '' }, { solver: 'js', ms: '1e9' },
+                           { solver: 'js', ms: '01' }, { solver: 'js', ms: '1\n' },
+                           { solver: ['js', 'js'], ms: '1' },
+                           { solver: 'js', ms: '12345678901' }];
         let refused = 0;
-        for (const args of [{}, { solver: 'wasm' }, { rate: '1' },
-                            { solver: 'gpu', rate: '1' }, { solver: 'js', rate: '1.5' },
-                            { solver: 'js', rate: '' }, { solver: 'js', rate: '1e9' },
-                            { solver: ['js', 'js'], rate: '1' },
-                            { solver: 'js', rate: '1234567890123' }]) {
+        for (const args of malformed) {
             if (send(args).code === 400) refused++;
         }
-        check(refused === 9, refused + ' of 9 malformed reports were refused');
+        check(refused === malformed.length,
+              refused + ' of ' + malformed.length + ' malformed reports were refused');
         const tally = read();
         check(tally.solved_wasm === '3' && tally.solved_js === '1',
               'four reports were counted as wasm=' + tally.solved_wasm +
               ' js=' + tally.solved_js);
         check(tally.solved_slow === '2',
               'two slow solves were counted as ' + tally.solved_slow);
-        check(tally.window === '21600', 'status reported window ' + tally.window);
+        check(tally.window === String(WINDOW), 'status reported window ' + tally.window);
         console.log('  counters: 5 rejected, 4 challenges, 1 accepted, 4 reports ' +
-                    '(2 slow), 9 malformed refused, and zone missing reported without one');
+                    '(2 slow), ' + malformed.length + ' malformed refused, and zone ' +
+                    'missing reported without one');
     } finally {
         if (saved === undefined) delete globalThis.ngx;
         else globalThis.ngx = saved;
@@ -1320,11 +1469,11 @@ await section("a cookie is refused by a host configured differently", async () =
     }
 });
 
-await section("a configuration warning is written once, not per request", async () => {
-    /* njs clones a VM per request from the configuration scope, so a module
-       variable is back to its loaded state every time. variantWith gives a
-       fresh module, which is the same thing: several of them with one shared
-       dictionary between them is what a worker actually does. */
+await section("a configuration warning is written once per set, not per request", async () => {
+    /* njs runs the module again for every request, so a module variable is
+       back to its loaded state every time. variantWith gives a fresh module,
+       which is the same thing: several of them with one shared dictionary
+       between them is what a worker actually does. */
     const store = new Map();
     const zone = {
         get(key) { return store.get(key); },
@@ -1337,6 +1486,8 @@ await section("a configuration warning is written once, not per request", async 
     };
     const saved = globalThis.ngx;
     const savedBits = process.env.ANTIBOT_POW_BITS;
+    const savedWindow = process.env.ANTIBOT_WINDOW_SIZE;
+    delete process.env.ANTIBOT_WINDOW_SIZE;
     try {
         process.env.ANTIBOT_POW_BITS = '999';
 
@@ -1361,6 +1512,15 @@ await section("a configuration warning is written once, not per request", async 
         check(first !== null && first.indexOf('POW_BITS=999') !== -1,
               'the warning did not name the setting: ' + JSON.stringify(first));
 
+        /* The zone outlives a reload, and a reload can bring in another bad
+           value, so different warnings are written once more. */
+        process.env.ANTIBOT_WINDOW_SIZE = '5';
+        let reloaded = 0;
+        for (let i = 0; i < 3; i++) reloaded += (await lines()).length;
+        delete process.env.ANTIBOT_WINDOW_SIZE;
+        check(reloaded === 2, 'three requests after a reload that added a bad value wrote ' +
+              reloaded + ' configuration warnings, expected the 2 it carries');
+
         /* Without the zone there is nowhere to record that one was written. */
         delete globalThis.ngx;
         let bare = 0;
@@ -1376,12 +1536,14 @@ await section("a configuration warning is written once, not per request", async 
         for (let i = 0; i < 3; i++) quiet += (await lines()).length;
         check(quiet === 0, 'a valid configuration wrote ' + quiet + ' warnings');
 
-        console.log('  config warnings: 1 in four requests with the zone, ' +
-                    '3 in three without it, 0 when nothing is wrong');
+        console.log('  config warnings: 1 in four requests with the zone, 2 in three ' +
+                    'after a reload that added a bad value, 3 in three without it, ' +
+                    '0 when nothing is wrong');
     } finally {
         if (saved === undefined) delete globalThis.ngx; else globalThis.ngx = saved;
         if (savedBits === undefined) delete process.env.ANTIBOT_POW_BITS;
         else process.env.ANTIBOT_POW_BITS = savedBits;
+        if (savedWindow !== undefined) process.env.ANTIBOT_WINDOW_SIZE = savedWindow;
     }
 });
 

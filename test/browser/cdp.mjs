@@ -8,12 +8,18 @@
  * gives back its value. close() resolves once the browser has exited and its
  * profile is removed: a browser still exiting writes into the profile, and
  * removing it then fails.
+ *
+ * Every call rejects rather than waits when the connection closes, errors or
+ * outlives CALL_TIMEOUT_MS, so a crashed browser fails the harness with a
+ * reason instead of holding it until the job times out.
  */
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+
+const CALL_TIMEOUT_MS = 600000;
 
 export async function launch(binary, flags = []) {
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'antibot-chromium-'));
@@ -25,26 +31,51 @@ export async function launch(binary, flags = []) {
         let seen = '';
         browser.stderr.on('data', (chunk) => {
             seen += chunk;
-            const m = /ws:\/\/\S+/.exec(seen);
-            if (m) resolve(m[0]);
+            /* The line ends the address, so one cut at a chunk boundary is
+               not taken. */
+            const m = /DevTools listening on (ws:\/\/\S+)\r?\n/.exec(seen);
+            if (m) resolve(m[1]);
         });
         browser.on('exit', (code) => reject(new Error(binary + ' exited with ' + code +
                                                       ': ' + seen.slice(0, 400))));
     });
     const ws = new WebSocket(endpoint);
-    await new Promise((resolve) => { ws.onopen = resolve; });
     let id = 0;
+    let broken = null;
     const pending = new Map();
+    const breakAll = (why) => {
+        broken = broken || new Error(why);
+        for (const [, p] of pending) p.reject(broken);
+        pending.clear();
+    };
+    await new Promise((resolve, reject) => {
+        ws.onopen = resolve;
+        ws.onerror = () => reject(new Error('could not connect to ' + endpoint));
+    });
+    ws.onerror = () => breakAll('the DevTools connection failed');
+    ws.onclose = () => breakAll('the DevTools connection closed');
+    browser.on('exit', (code) => breakAll(binary + ' exited with ' + code));
     ws.onmessage = (event) => {
         const m = JSON.parse(event.data);
         if (m.id && pending.has(m.id)) {
-            pending.get(m.id)(m);
+            pending.get(m.id).resolve(m);
             pending.delete(m.id);
         }
     };
-    const call = (method, params = {}, sessionId) => new Promise((resolve) => {
+    const call = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+        if (broken) {
+            reject(broken);
+            return;
+        }
         const n = ++id;
-        pending.set(n, resolve);
+        const timer = setTimeout(() => {
+            pending.delete(n);
+            reject(new Error(method + ' took longer than ' + CALL_TIMEOUT_MS + ' ms'));
+        }, CALL_TIMEOUT_MS);
+        pending.set(n, {
+            resolve: (m) => { clearTimeout(timer); resolve(m); },
+            reject: (e) => { clearTimeout(timer); reject(e); }
+        });
         ws.send(JSON.stringify({ id: n, method, params, sessionId }));
     });
 

@@ -16,26 +16,25 @@ __ANTIBOT_HEADING__<p>Verifying you are not a bot&hellip;</p>
   var challenge="__ANTIBOT_CHALLENGE__",bits=__ANTIBOT_BITS__;
   var slot="__ANTIBOT_SLOT__",cap=__ANTIBOT_CAP__;
   var expected=__ANTIBOT_EXPECTED__;
-  var pctEl=document.getElementById("pct"),began=0;
+  var pctEl=document.getElementById("pct");
   function finish(nonce,solver){
     var v="__ANTIBOT_COOKIE_NAME__="+slot+"."+nonce;
     try{
       document.cookie=v+";Path=/;Max-Age=__ANTIBOT_COOKIE_TTL__;SameSite=Lax;Secure";
       if(String(document.cookie).indexOf(v)===-1){fail();return;}
     }catch(err){fail();return;}
-    report(nonce,solver);
+    report(solver);
     setTimeout(function(){location.reload();},50);
   }
-  /* The workers scan interleaved blocks at one speed, so the nonces below the
-     winning one are about the number tried. Sent after the cookie is written,
+  /* The wait is what the visitor sat through: performance.now() counts from
+     navigation and never runs backwards. Sent after the cookie is written,
      because the report location is gated by it. */
-  function report(nonce,solver){
+  function report(solver){
     try{
-      var secs=Math.max(0.001,(new Date().getTime()-began)/1000);
-      var rate=Math.round((Number(nonce)+1)/secs);
-      if(navigator.sendBeacon){
+      var perf=window.performance;
+      if(navigator.sendBeacon&&perf&&perf.now){
         navigator.sendBeacon("__ANTIBOT_REPORT_PATH__?solver="+
-          (solver==="wasm"?"wasm":"js")+"&rate="+rate);
+          (solver==="wasm"?"wasm":"js")+"&ms="+Math.round(perf.now()));
       }
     }catch(err){}
   }
@@ -79,7 +78,6 @@ __ANTIBOT_HEADING__<p>Verifying you are not a bot&hellip;</p>
       workers.push(wk);
     }
     if(workers.length===0){fail();return;}
-    began=new Date().getTime();
     for(j=0;j<workers.length;j++){
       workers[j].postMessage({c:challenge,b:bits,m:cap,mod:mod,l:j,k:workers.length});
     }

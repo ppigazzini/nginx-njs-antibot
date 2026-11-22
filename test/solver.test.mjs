@@ -10,8 +10,7 @@
  *     engines that cannot compile a SIMD module
  *
  * Checks, in order:
- *   1. digest vectors    -- full digests against node's SHA-256 (wasm only;
- *                           the JS solver exposes no digest entry point)
+ *   1. digest vectors    -- full digests against node's SHA-256
  *   2. agreement         -- solve() returns the same index as brute force
  *   3. carry boundaries  -- the same, across the powers of ten where the
  *                           nonce's decimal width grows and the block is
@@ -184,18 +183,30 @@ function checkRealSolves(name, impl) {
     console.log("  " + name + " real solves at 18 bits: " + (10 - bad) + "/10 verified");
 }
 
-function benchmark(name, impl) {
-    const s = impl.load(crypto.randomBytes(32).toString('hex'));
-    s.solve(0, 2e6, 32);
-    const BATCH = 4e6, REPS = 5, rates = [];
+/* Each solver runs a batch in turn, so a change in the machine's load between
+   batches reaches every rate alike rather than one solver's phase. */
+function benchmark(list) {
+    const BATCH = 4e6, REPS = 5;
+    const runs = list.map(([name, impl]) => ({
+        name, rates: [], s: impl.load(crypto.randomBytes(32).toString('hex'))
+    }));
+    for (const run of runs) run.s.solve(0, 2e6, 32);
     for (let r = 0; r < REPS; r++) {
-        const t = process.hrtime.bigint();
-        s.solve(r * BATCH, BATCH, 32);
-        rates.push(BATCH / (Number(process.hrtime.bigint() - t) / 1e9));
+        for (const run of runs) {
+            const t = process.hrtime.bigint();
+            run.s.solve(r * BATCH, BATCH, 32);
+            run.rates.push(BATCH / (Number(process.hrtime.bigint() - t) / 1e9));
+        }
     }
-    rates.sort((a, b) => a - b);
-    console.log("  " + name + " throughput: " + (rates[2] / 1e6).toFixed(2) + "M hashes/sec (median of " + REPS + ")");
-    return rates[2];
+    const out = {};
+    for (const run of runs) {
+        run.rates.sort((a, b) => a - b);
+        const median = run.rates[REPS >> 1];
+        console.log("  " + run.name + " throughput: " + (median / 1e6).toFixed(2) +
+                    "M hashes/sec (median of " + REPS + ", interleaved)");
+        out[run.name.trim()] = median;
+    }
+    return out;
 }
 
 /* The two solvers are checked against node's SHA-256 separately above. A
@@ -279,7 +290,6 @@ const impls = [
     ['pure JS  ', jsSolverFromModule(), 'POW_JS_SOLVER in ' + MODULE_NAME],
 ];
 
-const rates = {};
 for (const [name, impl, where] of impls) {
     /* Both loaders call fail() before returning null, and wasmSolver() throws
        on a module that will not instantiate, so a solver cannot drop out of
@@ -289,9 +299,10 @@ for (const [name, impl, where] of impls) {
     await section(name.trim() + ": index agreement", () => checkAgreement(name, impl));
     await section(name.trim() + ": carry boundaries", () => checkCarries(name, impl));
     await section(name.trim() + ": real solves", () => checkRealSolves(name, impl));
-    rates[name.trim()] = benchmark(name, impl);
     console.log("");
 }
+const rates = benchmark(impls.filter((i) => i[1]));
+console.log("");
 
 await section("verifier and solver predicates agree", checkPredicates);
 console.log("");
@@ -304,12 +315,15 @@ if (byName['wasm SIMD'] && byName['pure JS']) {
 }
 
 /* The SIMD solver ships to be faster than the fallback. Both rates come from
-   this process on this machine, and the JS solver is compiled by the engine
-   rather than by clang, so the machine's speed cancels in the ratio. CI
-   measured 1.73 to 2.64 over 32 runs of the clang 18 build, and the same
-   source built at -O0 measures 0.15. A loss of a few percent is not this
-   check's to catch: build.sh pins the compiler for that. */
-const SIMD_LEAD_FLOOR = 1.4;
+   this process, in interleaved batches, and the JS solver is compiled by the
+   engine rather than by clang, so the machine's clock and load cancel in the
+   ratio. Its microarchitecture does not: CI measured 1.73 to 2.64 over 32
+   runs of the clang 18 build, and 1.20 on a runner type where the JS solver
+   ran at 8.14M hashes/sec against the usual 5.76M. The same source built at
+   -O0 measures 0.15. The floor is a SIMD solver no faster than the fallback;
+   a loss of a few percent is not this check's to catch, and build.sh pins the
+   compiler for that. */
+const SIMD_LEAD_FLOOR = 1.0;
 
 await section('the SIMD solver keeps its lead over the JS fallback', () => {
     if (!rates['wasm SIMD'] || !rates['pure JS']) {

@@ -12,9 +12,10 @@
  * The list is fixed. A generated set has a different survivor list on every
  * run, which fails at random and teaches nothing.
  *
- * Two defects are left out because the suite that catches them is the nginx
- * lane in CI, which needs a server: dropping the nosniff header and dropping
- * the no-store header. Both are grepped for there.
+ * Three defects are left out because the suite that catches them is the
+ * nginx lane in CI, which needs a server: dropping the nosniff header,
+ * dropping the no-store header, and checking a value with an anchored
+ * pattern, whose $ only njs lets match before a final newline.
  */
 
 import fs from 'fs';
@@ -46,9 +47,14 @@ const MUTANTS = [
     ['accept only the current slot', 'module',
      [['if (parsed.slot !== slot && parsed.slot !== slot - 1) {',
        'if (parsed.slot !== slot) {']]],
+    /* The second edit verifies an older cookie against its own slot's
+       challenge, so a cookie solved two slots back passes and one relabelled
+       there still fails on its nonce. */
     ['accept two slots back', 'module',
      [['if (parsed.slot !== slot && parsed.slot !== slot - 1) {',
-       'if (parsed.slot !== slot && parsed.slot !== slot - 1 && parsed.slot !== slot - 2) {']]],
+       'if (parsed.slot !== slot && parsed.slot !== slot - 1 && parsed.slot !== slot - 2) {'],
+      ['challenge_previous = expected_challenge(key, slot - 1);',
+       'challenge_previous = expected_challenge(key, parsed.slot);']]],
     ['verification always passes', 'module',
      [['        if (!pow_valid(challenge, parsed.nonce)) {',
        '        if (false) {']]],
@@ -107,7 +113,7 @@ const MUTANTS = [
      [['    const lang = clip(r.headersIn["Accept-Language"] || "");',
        '    const lang = r.headersIn["Accept-Language"] || "";']]],
     ['a number is read with Number()', 'module',
-     [['/^[0-9]{1,15}$/.test(raw) ? Number(raw) : NaN', 'Number(raw)']]],
+     [['made_of(raw, /[^0-9]/, 1, 15) ? Number(raw) : NaN', 'Number(raw)']]],
     ['translated addresses share a /64', 'module',
      [['    if (groups[0] === "64" && groups[1] === "ff9b") {', '    if (false) {']]],
     ['Teredo clients share a /64', 'module',
@@ -116,11 +122,21 @@ const MUTANTS = [
      [['    if (Number(nonce) >= POW_MAX_ITERATIONS) {',
        '    if (Number(nonce) > POW_MAX_ITERATIONS) {']]],
     ['a report is not validated', 'module',
-     [['    if ((solver !== "wasm" && solver !== "js") ||', '    if (false && (solver !== "wasm" && solver !== "js") ||']]],
+     [['    if ((solver !== "wasm" && solver !== "js") || !is_decimal(ms, 10)) {',
+       '    if (false) {']]],
     ['a slow solve is not counted', 'module',
      [['        count("solved_slow");', '        ;']]],
     ['the page sends no report', 'module',
      [['navigator.sendBeacon(\\"', 'String(\\"']]],
+    ['a warning is written once per zone, whatever it says', 'module',
+     [['if (dict.get(CONFIG_WARNED_KEY) === digest) {',
+       'if (dict.get(CONFIG_WARNED_KEY) !== undefined) {']]],
+    ['the logged URI is not clipped', 'module',
+     [['    const s = clip(String(text));', '    const s = String(text);']]],
+    ['the workers skip every other block', 'module',
+     [['stride=B*lanes,', 'stride=B*lanes*2,']]],
+    ['the report path may name another host', 'module',
+     [['v.charAt(0) === "/" && v.charAt(1) !== "/"', 'v.charAt(0) === "/"']]],
     /* This carries a second edit that removes the check which would
        otherwise absorb the first, so the suite has to notice the behaviour
        rather than the validation. */

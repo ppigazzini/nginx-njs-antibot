@@ -86,8 +86,11 @@ echo "  module: $module_so"
 nginx -v 2>&1 | sed 's/^/  /'
 dpkg-query -W libnginx-mod-http-js 2>/dev/null | sed 's/^/  /' || true
 
+# Two workers, so a counter or a once-only warning that held per worker
+# rather than in the shared zone would show.
 sed -e "s|^load_module .*|load_module $module_so;|" \
     -e "/^load_module/a error_log $TMP/logs/error.log info;" \
+    -e "/^load_module/a worker_processes 2;" \
     -e "/^load_module/a pid $TMP/nginx.pid;" \
     -e "s|^            # add_header Content-Security-Policy|            add_header Content-Security-Policy|" \
     -e "/^http {/a \\    access_log            $TMP/logs/access.log;" \
@@ -231,7 +234,7 @@ echo "== the solve report =="
 # The page sends this with the cookie it has just stored. The location is
 # gated, so a client without the cookie is refused before report() runs.
 case $report in
-    /__antibot_report\?solver=wasm\&rate=[1-9]*) ;;
+    /__antibot_report\?solver=wasm\&ms=[1-9]*) ;;
     *) fail "the page reported '$report'" ;;
 esac
 code=$(curl -ks -o /dev/null -w '%{http_code}' -X POST -A "$ua" -H "Cookie: $cookie" "$URL$report")
@@ -239,11 +242,16 @@ code=$(curl -ks -o /dev/null -w '%{http_code}' -X POST -A "$ua" -H "Cookie: $coo
 code=$(curl -ks -o /dev/null -w '%{http_code}' -X POST -A "$ua" "$URL$report")
 [ "$code" = "401" ] || fail "a report without a cookie answered $code"
 code=$(curl -ks -o /dev/null -w '%{http_code}' -X POST -A "$ua" -H "Cookie: $cookie" \
-         "$URL/__antibot_report?solver=gpu&rate=1")
+         "$URL/__antibot_report?solver=gpu&ms=1")
 [ "$code" = "400" ] || fail "a malformed report answered $code"
-grep -q 'antibot: solved by .* solver=wasm rate=' "$TMP/logs/error.log" \
+# njs decodes %0A into the argument, and its $ matches before a final
+# newline, so this is the case only njs can show refused.
+code=$(curl -ks -o /dev/null -w '%{http_code}' -X POST -A "$ua" -H "Cookie: $cookie" \
+         "$URL/__antibot_report?solver=wasm&ms=123%0A")
+[ "$code" = "400" ] || fail "a wait ending in a newline answered $code"
+grep -q 'antibot: solved by .* solver=wasm ms=' "$TMP/logs/error.log" \
     || fail "the report was not logged"
-ok "$report taken with the cookie, refused without it, malformed refused"
+ok "$report taken with the cookie, refused without it, malformed and ms=123%0A refused"
 echo "== cookie handling under njs =="
 
 # Duplicates, an empty value and a malformed value are covered under node.
@@ -350,6 +358,45 @@ for _ in $(seq 8); do curl -ks "$URL/" -o /dev/null; done
 warned=$(grep -c 'POW_BITS=999' "$TMP/logs/error.log" || true)
 [ "$warned" -eq 1 ] || fail "eight requests wrote $warned warnings for one setting, expected 1"
 ok "one warning for POW_BITS=999 across eight requests"
+
+# The zone outlives a reload, so the record that one load wrote its
+# warnings must not silence the next, which may bring a new bad value: here a
+# module whose source constant is invalid.
+sed 's/^const WINDOW_SIZE = .*;$/const WINDOW_SIZE = 0;/' "$MODULE" > "$TMP/njs/antibot.js"
+grep -q '^const WINDOW_SIZE = 0;$' "$TMP/njs/antibot.js" \
+    || fail "the WINDOW_SIZE declaration was not rewritten"
+reload
+for _ in $(seq 8); do curl -ks "$URL/" -o /dev/null; done
+window_warned=$(grep -c 'WINDOW_SIZE=0 is not' "$TMP/logs/error.log" || true)
+warned=$(grep -c 'POW_BITS=999' "$TMP/logs/error.log" || true)
+if [ "$window_warned" -ne 1 ] || [ "$warned" -ne 2 ]; then
+    fail "after a reload onto a bad constant, eight requests wrote $window_warned" \
+         "WINDOW_SIZE warnings and $warned POW_BITS warnings in all, expected 1 and 2"
+fi
+ok "a reload writes its own warnings once: WINDOW_SIZE=0 once, POW_BITS=999 again"
+install -m 644 "$MODULE" "$TMP/njs/antibot.js"
+
+echo "== a value ending in a newline =="
+
+# njs compiles a RegExp with PCRE2, where $ also matches before a final
+# newline, so only this lane shows such a value refused. A ConfigMap written
+# with a | block ends a value that way. Inserted into the page, it would end
+# the script's string literal and break the page for every visitor.
+stop_nginx
+: > "$TMP/logs/error.log"
+start_nginx ANTIBOT_COOKIE_NAME=$'__Host-nl\n' ANTIBOT_REPORT_PATH=$'/nl\n'
+curl -ks "$URL/" > "$TMP/nl.html"
+sed -n '/^<script>$/,/^<\/script>$/p' "$TMP/nl.html" | sed '1d;$d' > "$TMP/nl.js"
+[ -s "$TMP/nl.js" ] || fail "no inline script found in the page"
+node --check "$TMP/nl.js" || fail "a setting ending in a newline broke the page script"
+if grep -q '__Host-nl\|"/nl' "$TMP/nl.html"; then
+    fail "a setting ending in a newline reached the page"
+fi
+for setting in ANTIBOT_COOKIE_NAME=__Host-nl ANTIBOT_REPORT_PATH=/nl; do
+    grep -q "$setting" "$TMP/logs/error.log" \
+        || fail "$setting followed by a newline was not reported"
+done
+ok "a cookie name and a report path ending in a newline fell back and were reported"
 stop_nginx
 start_nginx
 

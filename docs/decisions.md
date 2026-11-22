@@ -67,13 +67,22 @@ own.** `pow_valid` reads `POW_BITS_EFFECTIVE`, and a cookie carries a slot and
 a nonce and no field for a difficulty, so nothing a request sends selects the
 bar it is judged against. A client that solves at fewer bits than the server
 enforces produces a nonce the server refuses. One that solves at more produces
-a nonce the server accepts, for more work than it needs.
+a nonce the server accepts, for more work than it needs, unless the nonce is
+at or above the server's cap: lowering `POW_BITS` by k bits refuses about
+`e^(-64/2^k)` of the cookies solved before, 1.8% at k=4, 13.5% at 5 and 36.8%
+at 6, and each of those visitors solves once at the new difficulty.
 
 The page ships the value because `solve(start, count, bits)` has no other
 stopping condition, and `cap` and `expected` state the same number again.
 Withholding it buys nothing: the [security model](security.md) rests on the
 HMAC key being the only secret, and the page ships the algorithm, the
 challenge and the solver in any case.
+
+**No prefilter runs before verification.** A prefilter needs state per
+client, and the module's only state is its counters. Verification is a small
+part of what a request costs under njs, where a core serves about 2,700
+challenged requests a second ([cost per request](security.md#cost-per-request)),
+and limiting a client's rate belongs to `limit_req`.
 
 **A challenged request answers 200, not 401.** `error_page 401 = /...` takes
 the status from the location it forwards to. A browser renders the page either
@@ -119,16 +128,32 @@ visitor. `Number()` read whitespace as 0, accepted `0x18` as 24 unreported,
 and turned `22.5` into a difficulty of 16, 64 times easier than the default.
 A number is now decimal digits and nothing else.
 
+**A value is checked by the characters it holds, never by an anchored
+pattern.** njs compiles a RegExp with PCRE2 and without
+`PCRE2_DOLLAR_ENDONLY`, so `$` also matches before a final newline. Under
+nginx 1.24.0 and njs 0.8.2, `/^[0-9]{1,12}$/` took `"123\n"`, and node, where
+the module suites run, refuses it. A cookie name ending in a newline passed,
+wrote no warning, and ended the page script's string literal, so the page
+failed for every visitor without a cookie; `?rate=123%0A` split a log line. A
+Kubernetes ConfigMap written with a `|` block ends a value that way. Only the
+nginx lane can show such a check refusing, so it carries the cases.
+
 **`COOKIE_TTL` defaults to twice the window in effect.** The constant was
 `2 * WINDOW_SIZE`, which follows the source window and not the environment's,
 so `ANTIBOT_WINDOW_SIZE=86400` alone was reported as a lifetime below twice
 the window. `null` means twice the window the module runs with.
 
-**A configuration warning is written once, through the shared zone.** njs
-clones a VM per request from the configuration scope, so anything a request
-writes to a module variable is gone before the next one reads it. Draining a
-list of warnings therefore repeats them on every request, at `error`, which is
-nginx's default level. The zone records that they were written.
+**A configuration warning is written once per set, through the shared
+zone.** njs runs the module's top-level code again for every request: under
+njs 0.8.2 a constant computed there held a new value on each request, on each
+worker and after a reload. Anything a request writes to a module variable is
+gone before the next one reads it, so draining a list of warnings repeats
+them on every request, at `error`, which is nginx's default level. The zone
+records a digest of the warnings written. A flag recorded only that some
+warning had been written, and the zone outlives a reload, so a bad value a
+reload brought in was used silently until a stop and a start. With the
+digest, a reload that changes the warnings writes them, and the same warnings
+after a reload are not written again.
 
 ## The build
 
@@ -142,9 +167,20 @@ SHA-256 in the notes and a signed build provenance attestation.
 quote or a brace wrong in the page reached a browser rather than the build.
 `build.sh` parses each before writing it in.
 
-**The page is a template split once at load, not substituted per request.**
-Substituting into it on every request would put the length of the page, which
-is mostly the embedded solver, into the cost of serving one.
+**The page is a template split into parts, not substituted into.** The
+template is `src/page.html`, 4.6 KB, and the solver goes in as a value, so
+the split scans the template and never the 20 KB page. Substituting into the
+assembled page would put its length, which is mostly the embedded solver,
+into the cost of serving one. node splits once; njs runs the module for every
+request, so there the split runs per request.
+
+**The template is split with `indexOf`, not a regular expression.** njs runs
+the module's top-level code for every request that reaches it, and node,
+where the suites and `test/bench/cost.mjs` run, evaluates it once. With
+`PAGE_TEMPLATE.split(/(__ANTIBOT_[A-Z0-9_]+__)/)` at the top, `check()` cost
+8.7 ms a request under nginx 1.24.0 and njs 0.8.2, where node measured
+0.13 us; with the `indexOf` scan, which gives the same parts for the
+template, it costs 129 to 137 us (`test/bench/njs-cost.mjs`).
 
 **The tag is `v` and the version.** For version `0.1.0` in `package.json` the
 tag is `v0.1.0`.
@@ -153,11 +189,13 @@ tag is `v0.1.0`.
 `git tag v1.2.3`. Go modules require the prefix on tags and release tooling
 defaults to it, so the tag carries it and the manifest does not.
 
-**The release pushes its tag before it creates the release.** A release
+**The release creates its tag before it creates the release.** A release
 created with `--target` names a commit by hash. A push that lands while the
 run is in flight can leave that commit on no branch, and GitHub answers 403
-for a target it cannot reach. Pushing the tag first makes the commit
-reachable, so the release is made against a ref rather than a hash.
+for a target it cannot reach. Creating the tag first makes the commit
+reachable, so the release is made against a ref rather than a hash. The tag is
+created through the API with the job's token, so checkout keeps no
+credential.
 
 **A release is refused rather than corrected.** The tag, the commit and the
 version stamped into the artifact must already agree. Publishing onto a tag
@@ -180,7 +218,25 @@ change within a major.
 **Provenance is signed in the `publish` job, not in `build`.** `build` runs
 for every push and pull request. Signing there needs `ci.yml` to grant
 `id-token: write` to every run, and signs builds that are never released. The
-`publish` job signs the one file it attaches, after the guards pass.
+`publish` job signs the one file it attaches, after the guards pass, and one
+guard compares that file with the SHA-256 `build` recorded: every job in the
+run holds a token that can replace an artifact.
+
+**A release is made from `main` and verified against `main` exactly.**
+`--signer-workflow` names a workflow and no ref, so a certificate from a run
+on any branch matched it, and gh before 2.102.0 matched it as a prefix, so
+`release.yml.x.yml` matched too. The repository has no branch protection, so
+any branch could have published. `--cert-identity` with the workflow and
+`refs/heads/main` is an exact match on every gh version, and `publish`
+refuses another ref.
+
+**Releases are not immutable.** An immutable release cannot be corrected: its
+file and tag stay, and a deleted release's tag name cannot be used again. The
+release steps that sign and verify have not run yet, so the first release
+would be permanent before they are proven. The provenance attestation binds
+`antibot.js` to the run on `main` that built it either way; immutability
+would add that the file under a tag never changes for a reader who does not
+verify.
 
 ## Workflows
 
@@ -207,25 +263,42 @@ callers of `build.yml`.
 cookie.** `location.reload()` cannot carry a header. A second cookie travels
 on every request to the site, so it puts another attacker-controlled input on
 the gated path, and counting it once per solve needs state. The beacon is one
-request per solve, reaches `report()` only with a valid cookie, and is
-dropped without harm where the location is missing.
+request per solve and reaches `report()` only with a valid cookie. Where the
+location is missing, it reaches the gated catch-all and the backend, one
+request per solve.
+
+**A solve counts as slow by the visitor's wait, not by a rate.** The page
+first reported the winning nonce over the time since its workers started.
+That time includes the workers' start, so a fast visitor whose nonce came
+early read as slow, in a share of about start-up over `SLOW_SOLVE_SECONDS`
+whatever the difficulty: 0.19% of solves with the 18 ms start measured in
+Chromium 156 on the reference machine, and 1.08% with a 100 ms start, over
+400,000 modelled solves. The winning nonce also counts the blocks other
+workers own, so below 22 bits the figure was not a rate. The wait from
+navigation is what the visitor sat through, and `performance.now()` never
+runs backwards.
 
 **A visitor with no JIT is served at the default difficulty.** Chromium with
-the JIT off has no WebAssembly and runs the JS solver at 0.019M hashes/sec per
-core, so a mean solve at 22 bits takes 72 s on four workers and 221 s on one.
+the JIT off has no WebAssembly and runs the JS solver, where a mean solve at
+22 bits takes about a minute ([difficulty](configuration.md#difficulty)).
 Lowering the default for that visitor lowers it for every client. The solve
 report counts the visitors on that path, `solved_js` and `solved_slow`, which
 is what a change of default would rest on.
 
 ## Tests
 
-**The SIMD solver's lead is asserted as a ratio, with a floor of 1.4.** Both
-rates come from one process over batches of 4,000,000 nonces, and the JS
-solver is compiled by the engine rather than by clang, so the machine's speed
-cancels; the ratio is not taken against a small input. CI measured 1.73 to
-2.64 over 32 runs of the clang 18 build, and an `-O0` build measures 0.15.
-A loss of a few percent is the compiler pin's to prevent, not this check's to
-catch.
+**The SIMD solver's lead is asserted as a ratio, with a floor of 1.0.** Both
+rates come from one process over interleaved batches of 4,000,000 nonces, and
+the JS solver is compiled by the engine rather than by clang, so the
+machine's clock and its load cancel; the ratio is not taken against a small
+input. Measured one solver after the other, a CPU hog during the wasm phase
+read 1.19x and failed a good build. The microarchitecture does not cancel:
+CI measured 1.73 to 2.64 over 32 runs of the clang 18 build, and 1.20 on a
+runner type where the JS solver ran at 8.14M hashes/sec against the 5.76M
+of the others, which failed the floor of 1.4 it was first given. An `-O0`
+build measures 0.15. The floor fails a SIMD solver no faster than the
+fallback; a loss of a few percent is the compiler pin's to prevent, not this
+check's to catch.
 
 **The fuzz corpus cache key rotates with the run id.** GitHub states that a
 cache entry cannot be changed, and a save against an existing key is skipped,

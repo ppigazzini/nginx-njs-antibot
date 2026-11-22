@@ -51,6 +51,9 @@ runtime.
   setting reaches the module.
 - [`$request_uri`](https://nginx.org/en/docs/http/ngx_http_core_module.html#var_request_uri):
   the URI the challenge line logs, which `error_page` leaves unchanged.
+- [PCRE2 API, compile options](https://www.pcre.org/current/doc/html/pcre2api.html):
+  `PCRE2_DOLLAR_ENDONLY`, without which `$` also matches before a final
+  newline. njs compiles its regular expressions with PCRE2 and without it.
 
 ## Addresses
 
@@ -78,6 +81,9 @@ runtime.
 
 - [Beacon](https://www.w3.org/TR/beacon/): `navigator.sendBeacon`, which sends
   the solve report.
+- [High Resolution Time](https://www.w3.org/TR/hr-time-3/):
+  `performance.now()`, which counts from navigation and gives the wait the
+  report carries.
 
 - [Cookie prefixes, RFC 6265bis](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis#name-cookie-name-prefixes):
   what `__Host-` requires and what it guarantees.

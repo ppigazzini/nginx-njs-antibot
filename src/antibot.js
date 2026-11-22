@@ -18,8 +18,8 @@ import cryptoModule from 'crypto';
 // COOKIE_NAME cookie. A cookie is accepted for its own slot and the one after
 // it, so it lasts between WINDOW_SIZE and twice WINDOW_SIZE.
 //
-// report() takes the solver path and rate the page sends after it solves, and
-// counts them.
+// report() takes the solver path and the wait the page sends after it solves,
+// and counts them.
 //
 // The module keeps no state a request can reach. Rate limiting and blocking
 // belong to limit_req.
@@ -59,12 +59,21 @@ function fail_config(message) {
     return true;
 }
 
-// njs clones a VM per request, so CONFIG_WARNINGS is full again on the next
-// request and draining it here does not carry. The shared dictionary is what
-// outlives the request: the first request to mark it writes the warnings and
-// the rest skip them. Without the zone every request writes them, because
-// there is nowhere to record that one already did.
+// njs runs this file again for every request, so CONFIG_WARNINGS is full
+// again on the next request and draining it here does not carry. The shared
+// dictionary outlives the request and a reload, and holds a digest of the
+// warnings last written: a request whose warnings have that digest skips
+// them, and a reload that brings different ones writes those once. Without
+// the zone every request writes them, because there is nowhere to record
+// that one did.
 const CONFIG_WARNED_KEY = "config_warned";
+
+// 48 bits of the SHA-256 of the warnings, a whole number a number zone holds
+// exactly.
+function warnings_digest() {
+    return parseInt(cryptoModule.createHash("sha256")
+        .update(CONFIG_WARNINGS.join("\n")).digest("hex").slice(0, 12), 16);
+}
 
 function report_config(r) {
     if (CONFIG_WARNINGS.length === 0) {
@@ -73,10 +82,11 @@ function report_config(r) {
     const dict = stats_dict();
     if (dict !== null) {
         try {
-            if (dict.get(CONFIG_WARNED_KEY) !== undefined) {
+            const digest = warnings_digest();
+            if (dict.get(CONFIG_WARNED_KEY) === digest) {
                 return;
             }
-            dict.set(CONFIG_WARNED_KEY, 1);
+            dict.set(CONFIG_WARNED_KEY, digest);
         } catch (err) {
             // The zone is unusable. A misconfiguration is worth repeating.
         }
@@ -96,6 +106,25 @@ function env_raw(name) {
     return value === undefined || value === "" ? null : value;
 }
 
+// True when v is a string of min to max characters, none of them matched by
+// outside, a class written negated such as /[^0-9]/. njs compiles a RegExp
+// with PCRE2, where $ also matches before a final newline, so /^[0-9]+$/
+// takes "22\n" under nginx and refuses it under node, where the suites run.
+// Every value this module embeds, logs or compares is checked this way. The
+// one anchored pattern left, in address_key(), runs only on text this has
+// checked.
+function made_of(v, outside, min, max) {
+    return typeof v === "string" && v.length >= min && v.length <= max &&
+        !outside.test(v);
+}
+
+// A string of decimal digits with no leading zero, as a nonce, a slot and a
+// reported wait are written.
+function is_decimal(v, max) {
+    return made_of(v, /[^0-9]/, 1, max) &&
+        (v.length === 1 || v.charAt(0) !== "0");
+}
+
 // A numeric setting from the environment, written in decimal digits. Number()
 // would also read whitespace as 0, hexadecimal, exponents and fractions, none
 // of which is a value an operator means, so anything else is NaN and fails
@@ -105,7 +134,8 @@ function env_integer(name) {
     if (raw === null) {
         return null;
     }
-    return ["ANTIBOT_" + name + "=" + raw, /^[0-9]{1,15}$/.test(raw) ? Number(raw) : NaN];
+    return ["ANTIBOT_" + name + "=" + raw,
+            made_of(raw, /[^0-9]/, 1, 15) ? Number(raw) : NaN];
 }
 
 function is_integer(v, min, max) {
@@ -176,8 +206,8 @@ const CHALLENGE_LOG_LEVEL = "info";
 
 const CHALLENGE_LOG_LEVELS = ["off", "info", "warn", "error"];
 
-// Where the page sends the solver path and rate after it solves. nginx serves
-// it from a location gated by check() that calls report().
+// Where the page sends the solver path and its wait after it solves. nginx
+// serves it from a location gated by check() that calls report().
 const REPORT_PATH = "/__antibot_report";
 
 // How many cookies sent under COOKIE_NAME are verified. A browser sends one:
@@ -231,7 +261,7 @@ const COOKIE_NAME_EFFECTIVE = (function () {
         [raw === null ? null : ["ANTIBOT_COOKIE_NAME=" + raw, raw],
          ["COOKIE_NAME=" + COOKIE_NAME, COOKIE_NAME], ["", BUILTIN.COOKIE_NAME]],
         function (name) {
-            return typeof name === "string" && /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/.test(name)
+            return made_of(name, /[^A-Za-z0-9!#$%&'*+\-.^_`|~]/, 1, Infinity)
                 ? null : "is not a cookie name";
         });
     if (v.indexOf("__Host-") !== 0) {
@@ -274,15 +304,18 @@ const CHALLENGE_LOG_LEVEL_EFFECTIVE = (function () {
 })();
 
 // The page inserts the path into a URL it requests from the same origin, so
-// it is an absolute path of URL-safe characters and nothing else.
+// it is an absolute path of URL-safe characters and nothing else. A second
+// leading / would make it a URL on another host.
 const REPORT_PATH_EFFECTIVE = (function () {
     const raw = env_raw("REPORT_PATH");
     return first_valid(
         [raw === null ? null : ["ANTIBOT_REPORT_PATH=" + raw, raw],
          ["REPORT_PATH=" + REPORT_PATH, REPORT_PATH], ["", BUILTIN.REPORT_PATH]],
         function (v) {
-            return typeof v === "string" && /^\/[A-Za-z0-9._~\/-]*$/.test(v)
-                ? null : "is not an absolute path of letters, digits and ._~/-";
+            return made_of(v, /[^A-Za-z0-9._~\/-]/, 1, Infinity) &&
+                v.charAt(0) === "/" && v.charAt(1) !== "/"
+                ? null : "is not an absolute path of letters, digits and ._~/-, " +
+                         "beginning with one /";
         });
 })();
 
@@ -366,7 +399,7 @@ function expand_ipv6(address) {
     }
     const all = groups.concat(tail);
     for (let i = 0; i < all.length; i++) {
-        if (!/^[0-9a-fA-F]{1,4}$/.test(all[i])) {
+        if (!made_of(all[i], /[^0-9a-fA-F]/, 1, 4)) {
             return null;
         }
         all[i] = parseInt(all[i], 16).toString(16);
@@ -397,6 +430,11 @@ function address_key(address) {
     if (address.indexOf(":") === -1) {
         return address;
     }
+    // Only hex digits, colons and dots reach the patterns below, so none of
+    // them can match before a final newline. A zone id is kept whole here.
+    if (!made_of(address, /[^0-9A-Fa-f:.]/, 1, Infinity)) {
+        return address;
+    }
     const mapped = /^::ffff:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/i.exec(address);
     if (mapped) {
         let octets_valid = true;
@@ -408,9 +446,6 @@ function address_key(address) {
         if (octets_valid) {
             return mapped[1] + "." + mapped[2] + "." + mapped[3] + "." + mapped[4];
         }
-    }
-    if (address.indexOf("%") !== -1) {
-        return address;
     }
     const groups = expand_ipv6(address);
     if (!groups) {
@@ -565,12 +600,12 @@ function parse_cookie_value(value) {
     }
     const slot = value.substring(0, dot);
     const nonce = value.substring(dot + 1);
-    if (!/^(0|[1-9][0-9]{0,11})$/.test(slot)) {
+    if (!is_decimal(slot, 12)) {
         return null;
     }
     // 15 digits at most: Number() is exact below 2^53, so the comparison
     // against the iteration cap below means what it says.
-    if (!/^(0|[1-9][0-9]{0,14})$/.test(nonce)) {
+    if (!is_decimal(nonce, 15)) {
         return null;
     }
     // The page's workers scan the nonces below the cap, so one at or above it
@@ -700,10 +735,36 @@ const WORKER_SOURCE_ESCAPED = JSON.stringify(WORKER_SOURCE).slice(1, -1);
 
 const PAGE_TEMPLATE = "";
 
-// Split once and joined per request. Substituting into the template on every
-// request would put the length of the page into the cost of serving it, and
-// the page is mostly the solver.
-const PAGE_PARTS = PAGE_TEMPLATE.split(/(__ANTIBOT_[A-Z0-9_]+__)/);
+// The template split on its __ANTIBOT_*__ tokens, text and tokens
+// alternating, and joined with values per request. Substituting into the
+// assembled page would put its length, mostly the solver, into the cost of
+// serving it. The split scans with indexOf: njs runs this file for every
+// request, and under njs 0.8.2 String.prototype.split with a regular
+// expression took about 10 ms of each one on the reference machine.
+const PAGE_PARTS = (function () {
+    const parts = [];
+    let text = 0;
+    let from = 0;
+    for (;;) {
+        const open = PAGE_TEMPLATE.indexOf("__ANTIBOT_", from);
+        if (open === -1) {
+            break;
+        }
+        const close = PAGE_TEMPLATE.indexOf("__", open + 10);
+        if (close === -1) {
+            break;
+        }
+        if (made_of(PAGE_TEMPLATE.slice(open + 10, close), /[^A-Z0-9_]/, 1, Infinity)) {
+            parts.push(PAGE_TEMPLATE.slice(text, open), PAGE_TEMPLATE.slice(open, close + 2));
+            text = close + 2;
+            from = text;
+        } else {
+            from = open + 1;
+        }
+    }
+    parts.push(PAGE_TEMPLATE.slice(text));
+    return parts;
+})();
 
 // Every token the template carries must have a value below. A token added to
 // src/page.html and not here would otherwise render as "undefined" in a page
@@ -785,29 +846,29 @@ function serve_challenge(r) {
     r.return(200, html);
 }
 
-// A solve counts as slow when the rate reported puts the mean solve at the
-// current difficulty above this many seconds.
+// A solve counts as slow when the visitor waited longer than this many
+// seconds from navigation to the nonce.
 const SLOW_SOLVE_SECONDS = 10;
 
-// The page sends the solver that won, "wasm" or "js", and its rate in hashes
-// per second, once it has written the cookie. REPORT_PATH is served from a
-// location gated by check(), so only a client holding a valid cookie reaches
-// this. A holder can send it again, so the counts are what visitors report.
+// The page sends the solver that won, "wasm" or "js", and the milliseconds
+// from navigation to the nonce, once it has written the cookie. REPORT_PATH is
+// served from a location gated by check(), so only a client holding a valid
+// cookie reaches this. A holder can send it again, so the counts are what
+// visitors report.
 function report(r) {
     report_config(r);
     const solver = r.args.solver;
-    const rate = r.args.rate;
-    if ((solver !== "wasm" && solver !== "js") ||
-        typeof rate !== "string" || !/^[0-9]{1,12}$/.test(rate)) {
+    const ms = r.args.ms;
+    if ((solver !== "wasm" && solver !== "js") || !is_decimal(ms, 10)) {
         r.return(400, "");
         return;
     }
     count("solved_" + solver);
-    if (Number(rate) * SLOW_SOLVE_SECONDS < POW_EXPECTED_WORK) {
+    if (Number(ms) > SLOW_SOLVE_SECONDS * 1000) {
         count("solved_slow");
     }
     log_challenge(r, "antibot: solved by " + log_field(r.remoteAddress) +
-                  " solver=" + solver + " rate=" + rate);
+                  " solver=" + solver + " ms=" + log_field(ms));
     r.return(204, "");
 }
 

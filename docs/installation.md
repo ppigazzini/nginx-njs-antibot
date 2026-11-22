@@ -50,26 +50,25 @@ Run `./build.sh`, which writes it to `dist/antibot.js`. Published builds
 appear under
 [releases](https://github.com/ppigazzini/nginx-njs-antibot/releases).
 
-A release after v0.0.2 is
-[immutable](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases):
-once published, its tag and `antibot.js` cannot be changed or deleted. It
-carries two signed attestations, and the
+A release after v0.0.2 carries a signed
+[build provenance attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds),
+which binds the SHA-256 of `antibot.js` to the commit and the run of
+`release.yml` on `main` that built it. The
 [GitHub CLI](https://cli.github.com/manual/gh_attestation_verify) verifies a
-downloaded copy against each. The release attestation binds the file to the
-release:
-
-```sh
-gh release verify-asset <tag> antibot.js --repo ppigazzini/nginx-njs-antibot
-```
-
-The build provenance attestation binds the file's SHA-256 to the commit and
-the workflow run that built it:
+downloaded copy against it:
 
 ```sh
 gh attestation verify antibot.js \
   --repo ppigazzini/nginx-njs-antibot \
-  --signer-workflow ppigazzini/nginx-njs-antibot/.github/workflows/release.yml
+  --cert-identity https://github.com/ppigazzini/nginx-njs-antibot/.github/workflows/release.yml@refs/heads/main \
+  --deny-self-hosted-runners
 ```
+
+`--cert-identity` matches the signing workflow and its branch exactly, so a
+file built by another workflow, or from another branch, fails. A release's
+file can be replaced after it is published; the attestation is what a
+download is checked against, and [decisions](decisions.md#the-build) says why
+releases are not immutable.
 
 ## Wiring
 

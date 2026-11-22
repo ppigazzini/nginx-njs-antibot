@@ -6,7 +6,10 @@
  *
  * Each argument is [label=]file. A .wasm file is measured as the SIMD
  * solver; a .js file is a built module, and the pure-JS solver it embeds is
- * measured. With no argument, dist/pow_solver.wasm and dist/antibot.js are.
+ * measured; openssl is `openssl speed` on SHA-256 over 64-byte inputs, one
+ * second a call, the rate of native code without SHA-256 instructions in
+ * hardware. With no argument, dist/pow_solver.wasm, dist/antibot.js and
+ * openssl are.
  *
  * Every solver gets five warm-up calls, then 15 rounds of one call of
  * 2,000,000 nonces at 32 bits, which never finds a solution, so each call
@@ -16,6 +19,8 @@
  */
 
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { machine } from './machine.mjs';
 
 const BATCH = 2e6;
 const WARMUP = 5;
@@ -50,32 +55,53 @@ function jsSolver(file) {
     return (start, count) => s.solve(start, count, 32);
 }
 
+/* `openssl speed -mr` prints +F:<n>:sha256:<bytes per second>. */
+function opensslRate() {
+    const out = execFileSync('openssl', ['speed', '-mr', '-seconds', '1', '-bytes', '64',
+                                         'sha256'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = /^\+F:\d+:sha256:([0-9.]+)$/m.exec(String(out));
+    if (!m) {
+        throw new Error('openssl speed printed no sha256 rate');
+    }
+    return Number(m[1]) / 64 / 1e6;
+}
+
 const args = process.argv.slice(2);
-const specs = args.length ? args : ['wasm=dist/pow_solver.wasm', 'js=dist/antibot.js'];
+const specs = args.length ? args
+    : ['wasm=dist/pow_solver.wasm', 'js=dist/antibot.js', 'openssl=openssl'];
 const solvers = specs.map((spec) => {
     const eq = spec.indexOf('=');
     const label = eq > 0 ? spec.slice(0, eq) : spec;
     const file = eq > 0 ? spec.slice(eq + 1) : spec;
+    if (file === 'openssl') {
+        return { label, measure: opensslRate, rates: [] };
+    }
     const solve = file.endsWith('.wasm') ? wasmSolver(file) : jsSolver(file);
-    return { label, solve, base: 0, rates: [] };
+    let base = 0;
+    const call = () => {
+        const t = process.hrtime.bigint();
+        solve(base, BATCH);
+        base += BATCH;
+        return BATCH / (Number(process.hrtime.bigint() - t) / 1e9) / 1e6;
+    };
+    return { label, measure: call, rates: [] };
 });
 
 for (const s of solvers) {
     for (let w = 0; w < WARMUP; w++) {
-        s.solve(s.base, BATCH);
-        s.base += BATCH;
+        s.measure();
     }
 }
 for (let r = 0; r < ROUNDS; r++) {
     for (const s of solvers) {
-        const t = process.hrtime.bigint();
-        s.solve(s.base, BATCH);
-        s.base += BATCH;
-        s.rates.push(BATCH / (Number(process.hrtime.bigint() - t) / 1e9) / 1e6);
+        s.rates.push(s.measure());
     }
 }
 
-console.log('node ' + process.version + ', ' + BATCH.toLocaleString('en-US') +
+console.log(machine());
+console.log('node ' + process.version + ', ' +
+            String(execFileSync('openssl', ['version'])).trim() + ', ' +
+            BATCH.toLocaleString('en-US') +
             ' nonces per call, median of ' + ROUNDS + ' calls');
 for (const s of solvers) {
     const sorted = s.rates.slice().sort((a, b) => a - b);

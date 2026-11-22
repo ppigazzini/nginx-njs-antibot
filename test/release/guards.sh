@@ -60,3 +60,32 @@ release_check_version() {
     fi
     return 0
 }
+
+# A release is made from main. The provenance check in docs/installation.md
+# names the workflow on refs/heads/main exactly, so a release from any other
+# ref would publish a file its own check refuses.
+release_check_ref() {
+    local ref=$1
+    if [ "$ref" != "refs/heads/main" ]; then
+        echo "refusing to release from '$ref': releases are made from refs/heads/main"
+        return 1
+    fi
+    return 0
+}
+
+# The file the publish job signs is the file the build job tested. Every job
+# in the run holds a token that can replace an artifact, so the digest the
+# build job recorded is compared before anything is signed.
+release_check_digest() {
+    local recorded=$1
+    local downloaded=$2
+    if [ -z "$recorded" ]; then
+        echo "the build job recorded no digest for antibot.js"
+        return 1
+    fi
+    if [ "$downloaded" != "$recorded" ]; then
+        echo "antibot.js is $downloaded, and the build job recorded $recorded"
+        return 1
+    fi
+    return 0
+}

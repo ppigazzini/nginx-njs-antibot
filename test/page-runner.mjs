@@ -127,9 +127,12 @@ export function runChallengePage(html, options = {}) {
             hardwareConcurrency: cores,
             sendBeacon(url) { beacons.push(url); return true; }
         };
+        /* performance.now() in a browser counts from navigation. */
+        const started = performance.now();
         const windowStub = {
             Worker: WorkerStub, Blob: BlobStub, URL: URLStub,
-            WebAssembly: withWebAssembly ? WebAssembly : undefined
+            WebAssembly: withWebAssembly ? WebAssembly : undefined,
+            performance: { now: () => performance.now() - started }
         };
 
         timer = setTimeout(() => {
