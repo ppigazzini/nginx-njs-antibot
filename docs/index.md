@@ -19,6 +19,8 @@ Reference:
 
 Explanation:
 
+- [How it works](how-it-works.md): one visitor through the gate, from the
+  first request to the backend, and where each part is documented
 - [Design](design.md): the algorithm, both solvers, the worker pool and the
   progress readout
 - [Security model](security.md): what is secret, the solver rates, how a

@@ -41,6 +41,7 @@ nav:
       - Configuration: configuration.md
       - Sources: references.md
   - Explanation:
+      - How it works: how-it-works.md
       - Design: design.md
       - Security model: security.md
       - Decisions: decisions.md
@@ -65,7 +66,14 @@ validation:
 markdown_extensions:
   - admonition
   - tables
-  - pymdownx.superfences
+  # A diagram is a mermaid block, text the page carries: the theme loads
+  # Mermaid on a page that holds one and draws it in the site's palette, and
+  # GitHub draws the same block.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
@@ -94,6 +102,7 @@ plugins:
           - configuration.md: The contract, every setting and its validation, difficulty and solve times, the solve report, the counters and logging.
           - references.md: The standards, upstream documentation and sources the pages rely on.
         Explanation:
+          - how-it-works.md: One visitor through the gate, from the first request to the backend, and where each part is documented.
           - design.md: The algorithm, both solvers, the worker pool and the progress readout.
           - security.md: What is secret, the solver rates, how a client is identified, what a request costs, and what the gate does not buy.
           - decisions.md: Questions that are settled, and the ground each was settled on.
