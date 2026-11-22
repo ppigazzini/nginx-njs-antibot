@@ -1,8 +1,9 @@
 name: build
 
 # Compiles the solver, assembles the deployable module, tests it, runs it
-# under a real nginx, and audits the workflows. Called by ci.yml on every push
-# and by release.yml before publishing, so both use exactly the same checks.
+# under a real nginx, builds the documentation site, and audits the
+# workflows. Called by ci.yml on every push and by release.yml before
+# publishing, so both use exactly the same checks.
 on:
   workflow_call:
     outputs:
@@ -196,6 +197,25 @@ jobs:
       - name: sanitizers, libFuzzer and valgrind
         run: ./test/native/check.sh 120 test/native/corpus
 
+  # Builds the documentation site as docs.yml publishes it, with --strict, so
+  # a dead link, a dead anchor or a page off the nav fails on every push
+  # rather than on main. The cache stays off: release.yml runs this job too.
+  docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: 0.13.7
+          enable-cache: false
+      - name: the site's toolchain, from uv.lock
+        run: uv sync --locked --group docs
+      - name: the site, built strict
+        run: uv run --no-sync zensical build --strict
+
   # Audits the workflows and the Dependabot config, and checks that
   # .github/workflows/actions.lock records the commit of every action they
   # use, including the actions those call.
@@ -233,8 +253,13 @@ jobs:
       # dependabot.yml sets for the actions.
       - name: gh-actions-lock is current
         run: |
-          days=$(sed -n 's/^ *default-days: *\([0-9][0-9]*\)$/\1/p' .github/dependabot.yml)
-          [ -n "$days" ] || { echo "no default-days in .github/dependabot.yml"; exit 1; }
+          # The cooldown of the github-actions entry, the first default-days
+          # after it; the uv entry carries its own.
+          days=$(awk '/package-ecosystem: *github-actions/ { found = 1 }
+                      found && /default-days:/ { print $2; exit }' .github/dependabot.yml)
+          case $days in
+            ''|*[!0-9]*) echo "no github-actions default-days in .github/dependabot.yml"; exit 1 ;;
+          esac
           eligible=$(gh release list --repo github/gh-actions-lock \
                        --exclude-drafts --exclude-pre-releases --limit 50 \
                        --json tagName,publishedAt \

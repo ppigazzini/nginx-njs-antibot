@@ -203,13 +203,38 @@ are held as `uint32_t` so arithmetic wraps as it does in wasm.
 `bits` leading zero bits. Inputs are biased toward the decimal-width
 boundaries where the block is rebuilt.
 
+## The site
+
+```sh
+uv sync --locked --group docs       # the site's toolchain, from uv.lock
+uv run zensical serve               # the site on localhost, rebuilt on save
+uv run zensical build --strict      # what CI runs; writes ./site
+```
+
+[Zensical](https://zensical.org/) builds the pages in `docs/` into the site
+from `mkdocs.yml`, which names the nav, the checks and the `llmstxt` export.
+`--strict` fails on a dead link, a dead anchor, or a page in `docs/` the nav
+does not list. Every page is one file directly under `docs/` and links to the
+others by name, so a link reads the same on GitHub and on the site; the
+sections exist only in the nav.
+
+The build writes [`llms.txt`](https://llmstxt.org/), a manifest of the pages
+in nav order with a line on each, and `llms-full.txt`, every page in full, and
+serves each page as Markdown at its address followed by `index.md`. The lines
+in `llms.txt` are the ones `docs/index.md` gives, set again in `mkdocs.yml`.
+
+`pyproject.toml` declares the `docs` group and nothing else, and `uv.lock`
+pins every package in it by hash. It takes a release once it is 7 days old,
+as Dependabot does, which proposes updates to the lock monthly.
+
 ## Continuous integration
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `build.yml` | `workflow_call` | five jobs: `build`, `mutants`, `example`, `sanitize`, `workflows` |
+| `build.yml` | `workflow_call` | six jobs: `build`, `mutants`, `example`, `sanitize`, `docs`, `workflows` |
 | `ci.yml` | push, pull request | calls `build.yml` |
 | `release.yml` | manual, tag required | calls `build.yml`, then publishes |
+| `docs.yml` | push to `main`, manual | builds the site and publishes it to GitHub Pages |
 
 `ci` and `release` share one reusable workflow, so a release runs exactly the
 checks CI runs.
@@ -239,6 +264,12 @@ the solver, assembles the module, repeats the build with warnings as errors,
 runs the three suites and `npm test`, records the SHA-256 of what it built as
 an output of `build.yml`, and uploads the artifact the other jobs take. The
 `sanitize` job runs `test/native/check.sh`.
+
+The `docs` job builds [the site](#the-site) with `--strict` on every push,
+so a broken link fails before `docs.yml` publishes it from `main`. `docs.yml`
+uploads the built site as a Pages artifact and deploys it through the
+`github-pages` environment, with the token `deploy-pages` presents over OIDC;
+there is no `gh-pages` branch.
 
 The `workflows` job runs [zizmor](https://docs.zizmor.sh/audits/) over the
 workflows and `.github/dependabot.yml` and fails on any finding. It then runs

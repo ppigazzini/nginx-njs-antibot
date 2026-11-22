@@ -64,6 +64,17 @@ runtime.
 - [RFC 4380](https://www.rfc-editor.org/rfc/rfc4380): Teredo, which carries
   its server's IPv4 address in `2001::/32` addresses.
 
+## The site
+
+- [Zensical](https://zensical.org/docs/): the builder, and the `mkdocs.yml`
+  it reads.
+- [llms.txt](https://llmstxt.org/): the manifest format `/llms.txt` follows.
+- [Custom workflows for GitHub Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages):
+  the Actions deployment `docs.yml` uses.
+- [uv dependency groups](https://docs.astral.sh/uv/concepts/projects/dependencies/#dependency-groups)
+  and [`exclude-newer`](https://docs.astral.sh/uv/reference/settings/#exclude-newer):
+  the `docs` group and the 7-day wait in `pyproject.toml`.
+
 ## Supply chain
 
 - [Workflow dependency lockfiles](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles):

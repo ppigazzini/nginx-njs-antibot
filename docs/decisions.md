@@ -238,6 +238,29 @@ would be permanent before they are proven. The provenance attestation binds
 would add that the file under a tag never changes for a reader who does not
 verify.
 
+## The site
+
+**The site is flat.** Its eight pages sit directly under `docs/` under their
+own names, and the sections exist only in the nav. A link between two pages
+is then the file's name, which GitHub and the site resolve alike, and moving
+a page between sections changes no link. valgebra puts its 26 pages in a
+folder per section; valgebra-jsonschema keeps its nine flat.
+
+**The home page is `docs/index.md`, not `docs/README.md`.** The site serves
+`index.md` as its home. GitHub shows a folder's `README.md` beside the file
+list, which a reader of `docs/` loses, and keeps the index one click away.
+
+**Zensical builds the site, from a lock.** Zensical, the successor the
+Material for MkDocs team maintains, reads `mkdocs.yml` as written and has
+search and the `llms.txt` export built in, so the site needs one package and
+no plugin. `uv.lock` pins it and its dependencies by hash, and a group in
+`pyproject.toml` declares it without making the repository a Python package.
+
+**The site is published by the Actions deployment, not a `gh-pages`
+branch.** The built site is an artifact of the run that built it and is
+deployed over OIDC through the `github-pages` environment, so no branch holds
+build output and no token can push one. It deploys from `main` alone.
+
 ## Workflows
 
 **A `uses:` line names an exact tag, and `actions.lock` holds the commit.** A

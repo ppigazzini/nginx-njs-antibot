@@ -14,7 +14,11 @@ builds appear under
 
 ## Documentation
 
-[docs/](docs/README.md)
+[ppigazzini.github.io/nginx-njs-antibot](https://ppigazzini.github.io/nginx-njs-antibot/),
+built from [docs/](docs/index.md). The site serves
+[llms.txt](https://ppigazzini.github.io/nginx-njs-antibot/llms.txt) and
+[llms-full.txt](https://ppigazzini.github.io/nginx-njs-antibot/llms-full.txt)
+for a reader that is not a browser.
 
 ## Licence
 

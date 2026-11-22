@@ -1,0 +1,11 @@
+# The documentation site. Zensical builds it from mkdocs.yml, the build job
+# checks it on every push and the workflow docs.yml publishes it from main.
+# This file declares no package, only the group the site is built with, and
+# uv.lock pins every wheel in it by hash.
+[dependency-groups]
+docs = ["zensical==0.1.1"]
+
+[tool.uv]
+# A release is taken once it is 7 days old, as .github/dependabot.yml waits
+# for one.
+exclude-newer = "7 days"

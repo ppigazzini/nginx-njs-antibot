@@ -134,9 +134,9 @@ oversized User-Agent or Accept-Language does not buy a larger HMAC.
 
 At most `MAX_COOKIE_CANDIDATES` cookies sent under the name are collected and
 verified, so a header full of them multiplies the module's work for a request
-by at most 4.2 to 4.5, which four junk cookies over two slots reach: each slot costs an
-HMAC-SHA256 and each cookie a SHA-256. 256 junk cookies cost less than four,
-because only four are verified and they share one slot.
+by at most 4.2 to 4.5, which four junk cookies over two slots reach: each
+slot costs an HMAC-SHA256 and each cookie a SHA-256. 256 junk cookies cost
+less than four, because only four are verified and they share one slot.
 
 `test/module.test.mjs` fails if the page size moves more than a kilobyte from
 the figure above.

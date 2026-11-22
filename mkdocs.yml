@@ -1,0 +1,101 @@
+site_name: nginx-njs-antibot
+site_description: A proof-of-work gate for nginx, written as an njs module.
+site_url: https://ppigazzini.github.io/nginx-njs-antibot/
+repo_url: https://github.com/ppigazzini/nginx-njs-antibot
+repo_name: ppigazzini/nginx-njs-antibot
+copyright: Dual-licensed BlueOak-1.0.0 OR Apache-2.0
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.footer
+    - content.code.copy
+    - toc.follow
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+# Every page sits in docs/ under its own name, so a link between pages reads
+# the same on GitHub and on the site. The sections are in the nav alone.
+nav:
+  - Home: index.md
+  - Get started:
+      - Installation: installation.md
+  - Reference:
+      - Configuration: configuration.md
+      - Sources: references.md
+  - Explanation:
+      - Design: design.md
+      - Security model: security.md
+      - Decisions: decisions.md
+  - Contributing:
+      - Development: development.md
+
+# Every check the builder makes on a link and on the nav, raised to a warning
+# so that --strict fails the build on it: a page or an anchor a link names
+# that does not exist, a page under docs/ that no nav entry lists, and a link
+# the builder cannot read as one to a page.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
+markdown_extensions:
+  - admonition
+  - tables
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  # The site for a reader that is not a browser: /llms.txt, a manifest that
+  # follows the nav, and /llms-full.txt, every page in full. Each page also
+  # answers at its address with index.md, which /llms.txt links to. The
+  # descriptions are the ones docs/index.md gives; a change goes in both.
+  - llmstxt:
+      markdown_description: >-
+        A proof-of-work gate for nginx, written as an njs module. Browser-facing
+        routes sit behind auth_request; a request without a valid cookie is
+        answered with a page that solves a SHA-256 challenge in four-way SIMD
+        WebAssembly over a pool of Web Workers, with a pure-JS fallback, and
+        stores the cookie. The deployable module is one file, antibot.js.
+      full_output: llms-full.txt
+      sections:
+        Get started:
+          - index.md: What the gate is, and each page with what it covers.
+          - installation.md: Requirements, getting and verifying antibot.js, and wiring it into nginx.
+        Reference:
+          - configuration.md: The contract, every setting and its validation, difficulty and solve times, the solve report, the counters and logging.
+          - references.md: The standards, upstream documentation and sources the pages rely on.
+        Explanation:
+          - design.md: The algorithm, both solvers, the worker pool and the progress readout.
+          - security.md: What is secret, the solver rates, how a client is identified, what a request costs, and what the gate does not buy.
+          - decisions.md: Questions that are settled, and the ground each was settled on.
+        Contributing:
+          - development.md: Building, the test suites, the nginx lane, measurements, continuous integration, releases and this site.

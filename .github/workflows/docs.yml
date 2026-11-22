@@ -1,0 +1,54 @@
+name: docs
+
+# Builds the documentation site and publishes it to GitHub Pages through the
+# Actions deployment: the site is uploaded as an artifact and deployed over
+# OIDC, with no gh-pages branch. It follows main, and a manual run publishes
+# again. The repository's Pages source is GitHub Actions.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time, and one in flight is never cancelled.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: 0.13.7
+          enable-cache: false
+      - uses: actions/configure-pages@v6.0.0
+      - name: the site's toolchain, from uv.lock
+        run: uv sync --locked --group docs
+      - name: the site, built strict
+        run: uv run --no-sync zensical build --strict
+      # zensical writes ./site; upload-pages-artifact reads ./_site unless told.
+      - uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write     # deploy the uploaded site to Pages
+      id-token: write  # the OIDC token deploy-pages presents to Pages
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5.0.1

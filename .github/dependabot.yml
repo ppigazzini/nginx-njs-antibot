@@ -14,3 +14,17 @@ updates:
           - "*"
     commit-message:
       prefix: ci
+  # The site's toolchain in uv.lock. pyproject.toml holds the same 7-day wait
+  # for a lock made by hand.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      docs:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: docs

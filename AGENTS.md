@@ -2,7 +2,7 @@
 
 ## References
 
-Read `docs/README.md` for the documentation index and `docs/references.md`
+Read `docs/index.md` for the documentation index and `docs/references.md`
 for the sources it relies on.
 
 Use these upstream sources:
